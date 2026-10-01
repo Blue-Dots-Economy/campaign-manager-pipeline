@@ -1,0 +1,9 @@
+.env
+dumps/
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.postman_environment.json
+csv/
+snapshot-report.html

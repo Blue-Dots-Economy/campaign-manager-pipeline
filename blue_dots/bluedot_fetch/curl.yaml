@@ -1,0 +1,235 @@
+openapi: 3.0.3
+info:
+  title: Campaign Manager — Non-PII Dump API
+  version: "1.0.0"
+  description: |
+    Two calls, used **in sequence**:
+
+    1. **Generate a system token** from Keycloak using the `client_credentials`
+       grant. This is the **only** token the dump API accepts (a coordinator /
+       user token is rejected with `403 NOT_SYSTEM_CLIENT`).
+    2. **Call the dump API** with `Authorization: Bearer <access_token>`. It
+       returns short-lived, pre-signed S3 URLs for the latest **non-PII**
+       snapshot — the three objects `user`, `items`, `item_actions` — so the
+       caller needs no S3 credentials.
+
+    ### How to use
+    ```
+    # 1) get the token
+    POST {keycloak_url}/realms/{realm}/protocol/openid-connect/token
+         grant_type=client_credentials&client_id=...&client_secret=...
+      -> { "access_token": "eyJ...", "expires_in": 300, ... }
+
+    # 2) use it on the dump
+    GET  {base_url}/v1/campaign/dump
+         Authorization: Bearer eyJ...
+      -> { "network": ..., "files": [ user, items, item_actions ] }
+    ```
+
+    ### Notes
+    - The token is short-lived (`expires_in`); cache and reuse it until it expires.
+    - The dump always returns **all three files or an error** — never a partial list.
+    - **Downloading a file:** open its `url` in a browser tab / GET it with **no**
+      `Authorization` header — the signature is in the query string; adding a
+      header breaks it.
+    - The three `last_modified` values can differ: the upstream exporter writes
+      the three objects independently, so a request landing mid-run can mix runs.
+      Compare the timestamps; if they disagree, treat the snapshot as torn and re-fetch.
+
+servers:
+  - url: "{base_url}"
+    description: Campaign Manager API base URL.
+    variables:
+      base_url:
+        default: https://campaign.example.org
+
+security: []
+
+components:
+  securitySchemes:
+    systemToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: The Keycloak `client_credentials` access_token from step 1.
+
+  schemas:
+    TokenResponse:
+      type: object
+      properties:
+        access_token: { type: string, description: JWT bearer token. }
+        expires_in: { type: integer, description: Lifetime in seconds. }
+        refresh_expires_in: { type: integer }
+        token_type: { type: string, example: Bearer }
+        "not-before-policy": { type: integer }
+        scope: { type: string }
+      required: [access_token, expires_in, token_type]
+
+    DumpResponse:
+      type: object
+      properties:
+        network: { type: string, example: blue_dot }
+        instance: { type: string, example: signals-purpledots }
+        expires_at:
+          type: string
+          format: date-time
+          description: When the pre-signed URLs stop working.
+        files:
+          type: array
+          description: Always exactly three, in this order.
+          items:
+            type: object
+            properties:
+              table:
+                type: string
+                enum: [user, items, item_actions]
+              url:
+                type: string
+                description: Pre-signed S3 URL (signature in the query string; no auth header needed to download).
+              last_modified: { type: string, format: date-time }
+              size_bytes: { type: integer }
+            required: [table, url, last_modified, size_bytes]
+      required: [network, instance, expires_at, files]
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code: { type: string }
+            detail: { type: string }
+            fields:
+              type: object
+              description: Present on some errors (e.g. the objects missing from the snapshot).
+          required: [code]
+      required: [error]
+
+paths:
+  /realms/{realm}/protocol/openid-connect/token:
+    servers:
+      - url: "{keycloak_url}"
+        description: Keycloak base URL.
+        variables:
+          keycloak_url:
+            default: https://auth.example.org
+    post:
+      operationId: generateSystemToken
+      summary: "1. Generate system token (client_credentials)"
+      description: |
+        Machine-to-machine token for the campaign manager's own server. This is the
+        **only** token the non-PII dump accepts. The service account carries no
+        `aggregator_id` / `signalstack_org_id` — that absence is what makes it a
+        *system* caller rather than a coordinator.
+      security: []
+      parameters:
+        - name: realm
+          in: path
+          required: true
+          schema: { type: string }
+          example: campaign
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, client_id, client_secret]
+              properties:
+                grant_type:
+                  type: string
+                  enum: [client_credentials]
+                client_id: { type: string }
+                client_secret: { type: string, format: password }
+            example:
+              grant_type: client_credentials
+              client_id: campaign-manager
+              client_secret: REPLACE_WITH_CLIENT_SECRET
+      responses:
+        "200":
+          description: Token issued.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TokenResponse" }
+              example:
+                access_token: "eyJhbGciOiJSUzI1NiIsInR5cCIgOiAiSldUIiwia2lkIiA6ICJ4Y2..."
+                expires_in: 300
+                refresh_expires_in: 0
+                token_type: "Bearer"
+                "not-before-policy": 0
+                scope: "profile email"
+        "401":
+          description: Invalid client or client secret.
+          content:
+            application/json:
+              example:
+                error: "invalid_client"
+                error_description: "Invalid client secret"
+
+  /v1/campaign/dump:
+    get:
+      operationId: getLatestNonPiiDump
+      summary: "2. Get latest non-PII dump"
+      description: |
+        Returns a short-lived pre-signed URL for each of the three objects in the
+        latest **non-PII** snapshot (`user`, `items`, `item_actions`). Whole-network:
+        it returns every aggregator's rows, not just one org's. Requires the system
+        (`client_credentials`) token from step 1.
+      security:
+        - systemToken: []
+      responses:
+        "200":
+          description: The latest snapshot's pre-signed URLs.
+          headers:
+            Cache-Control:
+              schema: { type: string }
+              description: "`no-store` — the body is three bearer-equivalent URLs."
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DumpResponse" }
+              example:
+                network: "blue_dot"
+                instance: "signals-purpledots"
+                expires_at: "2026-08-31T05:15:00Z"
+                files:
+                  - table: "user"
+                    url: "https://s3.ap-south-1.amazonaws.com/signals-dumps/blue_dot/user.jsonl?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=EXAMPLE%2F20260831%2Fap-south-1%2Fs3%2Faws4_request&X-Amz-Date=20260831T044500Z&X-Amz-Expires=1800&X-Amz-SignedHeaders=host&X-Amz-Signature=1a2b3c4d5e6f...example"
+                    last_modified: "2026-08-31T04:00:12Z"
+                    size_bytes: 1048576
+                  - table: "items"
+                    url: "https://s3.ap-south-1.amazonaws.com/signals-dumps/blue_dot/items.jsonl?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=EXAMPLE%2F20260831%2Fap-south-1%2Fs3%2Faws4_request&X-Amz-Date=20260831T044500Z&X-Amz-Expires=1800&X-Amz-SignedHeaders=host&X-Amz-Signature=2b3c4d5e6f7a...example"
+                    last_modified: "2026-08-31T04:00:14Z"
+                    size_bytes: 5242880
+                  - table: "item_actions"
+                    url: "https://s3.ap-south-1.amazonaws.com/signals-dumps/blue_dot/item_actions.jsonl?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=EXAMPLE%2F20260831%2Fap-south-1%2Fs3%2Faws4_request&X-Amz-Date=20260831T044500Z&X-Amz-Expires=1800&X-Amz-SignedHeaders=host&X-Amz-Signature=3c4d5e6f7a8b...example"
+                    last_modified: "2026-08-31T04:00:13Z"
+                    size_bytes: 2097152
+        "403":
+          description: A coordinator / user token was used — this route needs the system token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  code: "NOT_SYSTEM_CLIENT"
+                  detail: "This route requires the campaign-manager system (client_credentials) token."
+        "404":
+          description: The latest snapshot is missing one or more objects (never partial — all three or this error).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  code: "DUMP_NOT_AVAILABLE"
+                  detail: "The latest snapshot is missing one or more objects."
+                  fields:
+                    missing: ["item_actions"]
+        "503":
+          description: The dump is not configured on this deployment.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example:
+                error:
+                  code: "DUMP_NOT_CONFIGURED"
+                  detail: "CAMPAIGN_DUMP_INSTANCE_ID is not set on this deployment."

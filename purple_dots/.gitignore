@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+secrets/
+__pycache__/
+*.pyc
+.venv/
+# NO exceptions here. The Basti sheet is kept on DISK (it is the only
+# copy carrying phone numbers, and the sheet_call_id mapping came from
+# it) but it holds named individuals with age, address, disability type
+# and disability percentage. Keeping a file and committing it are not
+# the same decision; an earlier negation here conflated them.
+data/*.csv

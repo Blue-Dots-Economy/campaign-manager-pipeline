@@ -1,0 +1,26 @@
+# both pipelines keep their own .env; neither may be committed
+.env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# service account private keys - never commit
+secrets/
+**/secrets/
+
+# Postman environments carry live Keycloak client_secrets. This rule also
+# exists in bluedot_fetch/.gitignore; it is repeated here deliberately, so
+# deleting that nested file cannot expose them.
+*.postman_environment.json
+**/*.postman_environment.json
+
+.venv/
+__pycache__/
+**/__pycache__/
+*.pyc
+
+# generated CSVs and caches
+**/data/*.csv
+**/*_cache.json

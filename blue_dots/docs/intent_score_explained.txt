@@ -1,0 +1,63 @@
+INTENT SCORE - HOW IT WORKS
+===========================
+
+The score is 0 to 10. It answers one question:
+
+    "Did this person actually want a job?"
+
+0 = no.  10 = yes, badly.
+High scores are the people worth calling back.
+
+
+FIRST WE CHECK FOR 4 SITUATIONS
+-------------------------------
+If any of these is true, we stop and use that score:
+
+    Never phoned them yet ................. 0
+    They applied for a job ................ 9   (best outcome)
+    Wanted to apply, our system broke ..... 7   (our fault, not theirs)
+    Phone never connected ................. 0
+
+
+OTHERWISE, ADD UP POINTS
+------------------------
+    Talked over 10 seconds ....... +1
+    Talked over 30 seconds ....... +1
+    Talked over 1 minute ......... +1
+    Talked over 2 minutes ........ +1
+
+    We showed them real jobs ..... +2   (worth double - they had to
+                                         tell us what work they want
+                                         and where they live)
+
+    They talked back to us ....... +1
+
+Longer talk = more interest. Max this way is 7.
+To beat 7 you have to actually apply (that's the 9).
+
+
+EXAMPLES
+--------
+    Talked 4 min, saw jobs, applied ............ 9
+    Talked 40 sec, no jobs shown, mostly quiet .. 2
+
+
+WHERE THE ANSWERS COME FROM
+---------------------------
+All of it from the phone system's own record of the call.
+Nothing is guessed.
+
+
+NOTE ON OLD SPREADSHEETS
+------------------------
+An older version gave no points for showing jobs, so old
+scores are usually 1 lower. It also produced 8s and 10s.
+Ours only gives 0-7 and 9. Ours isn't broken, just different.
+
+
+IN THE CODE
+-----------
+transform.py -> compute_intent_score()
+
+Every row also stores why it got its score, in the column
+intent_score_reasoning (e.g. ">10s; >30s; jobs shown").

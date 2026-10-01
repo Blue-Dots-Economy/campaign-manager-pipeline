@@ -1,0 +1,230 @@
+================================================================================
+RAYA BOT INPUT FORMATS
+Blue Dots - Kaam Ki Baat, Dhande Ki Baat, HE colleges, TRRAIN
+Read from the live batches on 30 September 2026
+================================================================================
+
+HOW A BATCH IS MADE UP
+----------------------
+A batch has settings, and a list of contacts. Each contact is three things:
+
+    phone         10 digits
+    name          the person's name, or "Not Available"
+    agent_args    a JSON object - this is where everything else goes
+
+Batch settings: agent_id, name, concurrency, max_retries, retry_after_hrs.
+
+Via the API:
+    POST /api/batch                  create it
+    POST /api/batch/{id}/contacts    add the contacts
+    POST /api/batch/{id}/start       start dialling
+
+There is also POST /api/call for a single call: agent_id + to_number +
+agent_args, with an optional scheduled_at. No batch needed.
+
+
+================================================================================
+1. SEEKER BOTS - offer a list of jobs
+================================================================================
+
+KKB Placeholder                          (main seeker bot, 43,253 calls)
+  id       da612923-1927-45d7-9ad0-b1c7cbb15294
+  jfc      Ghaziabad
+  settings concurrency 12, max_retries 2, retry_after_hrs 1
+
+  agent_args, 2 keys:
+    contact_memory      "Not Available" for a new contact
+    recommendations     JSON STRING - a list of jobs (see below)
+
+
+KKB Placeholder- Hindi Signals API
+  id       115b38a5-42ef-4082-be69-84a871bb226a
+  jfc      Ghaziabad
+  settings concurrency 25, max_retries 3, retry_after_hrs 1
+
+  agent_args, 3 keys:
+    contact_memory      "Not Available"
+    location            free text, e.g. "D 170, Govindpuram, Ghaziabad"
+    recommendations     JSON STRING - a list of jobs
+
+
+KKB Placeholder- Kannada Signals API
+  id       33037201-78ce-405d-b509-a3b6934e20f1
+  jfc      Hubli-Dharwad
+  settings concurrency 50, max_retries 2, retry_after_hrs 1
+
+  agent_args, 4 keys:
+    college_name        empty string in practice
+    contact_memory      "Not Available"
+    location            empty string in practice
+    recommendations     JSON STRING - a list of jobs
+
+
+THE recommendations FIELD
+  A JSON *string*, not an object. One entry per job offered on the call:
+
+    [
+      {
+        "job_id":        "c7927f97-8e61-4a01-a617-3779f2e17cdb",
+        "role":          "Tele Marketing Female",
+        "company":       "GLOBAL CHEMICALS",
+        "qualification": "12th"
+      },
+      ...
+    ]
+
+  job_id must be a real posting id. 219 apply attempts failed with "Job not
+  found" because recommendations pointed at jobs that no longer existed -
+  check the id resolves before putting it in a batch.
+
+
+================================================================================
+2. HE COLLEGE BOTS - jobs, plus which college
+================================================================================
+
+Maya KKB College Hindi                   (the HE college campaigns, 7,059 calls)
+  id       47fdffe6-0cb0-4fcf-8762-135ddadfb194
+  jfc      Ghaziabad
+  settings concurrency 30, max_retries 2, retry_after_hrs 1
+
+  agent_args, 4 keys:
+    college_name        RAW name, e.g. "VMLG College"
+    contact_memory      "Not Available"
+    new_seeker          "Yes" / "No"
+    recommendations     JSON STRING - a list of jobs
+
+
+Maya Hindi Signals
+  id       904f333f-1919-4523-a51d-b22ba382dd22
+  jfc      Ghaziabad
+  settings concurrency 20, max_retries 3, retry_after_hrs 1
+
+  agent_args, 4 keys:
+    college_name        RAW name, e.g. "MANYAWAR KANSHIRAM GOVERNMENT COLLEGE"
+    contact_memory      "Not Available"
+    location            empty string in practice
+    recommendations     JSON STRING - a list of jobs
+
+
+  NOTE ON college_name
+  The bots are sent the raw college name and each batch spells it
+  differently - "VMLG College", "MANYAWAR KANSHIRAM GOVERNMENT COLLEGE",
+  "Multanimal Modi College, Ghaziabad" (wrong: it is in Modinagar). The
+  pipeline normalises all of it to five canonical names on the way in.
+  Send whatever the college is called; do not try to match the canonical set.
+
+
+================================================================================
+3. TRRAIN - follow up on an application already made
+================================================================================
+
+TRRAIN Hindi
+  id       cf39a59a-3b24-4842-ba03-4248ec245aa1
+  settings concurrency 10, max_retries 3, retry_after_hrs 1
+
+  agent_args, 4 keys:
+    applied_job_company   e.g. "Quess Corp Limited"
+    applied_job_role      e.g. "Tele Salesperson"
+    college_name          e.g. "Kanshiram College, Ghaziabad"
+    contact_memory        "Not Available"
+
+  No recommendations field. This bot is not offering jobs - it is calling
+  someone who already applied, so it needs the job they applied TO.
+
+
+TRRAIN Kannada
+  id       dfeda883-3d2d-4a74-a0b5-1a47fdde2282
+  NO BATCHES EVER RUN. No established format.
+  Start from TRRAIN Hindi's four keys.
+
+
+================================================================================
+4. EMPLOYER BOTS - one job posting per contact
+================================================================================
+
+DKB Hindi- New                           (main employer bot)
+  id       57814ac8-5d79-41f5-bab7-bcfe2d9aac4f
+  jfc      Ghaziabad
+  settings concurrency 15, max_retries 2, retry_after_hrs 1
+
+  agent_args, 12 keys - all of them, every time:
+    city                    "Ghaziabad"
+    company_name            "VASUNDHARA MARBLE & GRANITE"
+    contact_memory          "Not Available"
+    job_id                  posting id, or "Not Available"
+    job_role                or "Not Available"
+    location                the full address, e.g. "Flat No:- GALI NO 2,
+                            Building:- SHIVPURI, Road/Street:- GHAZIABAD, ..."
+    num_vacancies           or "Not Available"
+    phoneNumber             note the camelCase; empty string in practice
+    qualification           or "Not Available"
+    salary                  or "Not Available"
+    work_experience         or "Not Available"
+    work_experience_years   or "Not Available"
+
+  One posting per contact, NOT a list. This bot confirms or updates a single
+  job, so a provider with three openings is three contacts.
+
+
+DKB Kannada- New
+  id       d1a1614f-fa7e-41c1-8963-e7f3af213a13
+  jfc      Hubli-Dharwad
+  Same 12 keys as DKB Hindi- New.
+
+
+DKB Hindi Signals
+  id       fabda71d-af75-4ddd-8cf1-fa35c827f753
+  jfc      Ghaziabad
+  NO BATCHES EVER RUN. Copy DKB Hindi- New's 12 keys.
+
+DKB Kannada Signals
+  id       847a85e2-c5c8-4727-9918-f1db9efad05d
+  jfc      Hubli-Dharwad
+  NO BATCHES EVER RUN. Copy DKB Hindi- New's 12 keys.
+
+
+================================================================================
+5. INBOUND BOTS - no input at all
+================================================================================
+
+These take calls rather than making them, so they are never given a batch.
+Their agent_args carry only contact_memory, set by Raya at call time.
+
+  KKB Inbound Placeholder- Kannada   4ac90bf1-a740-4b1c-92b0-45bda099e53f
+  KKB Inbound Placeholder            b6222233-8a8d-49a6-9950-d07e9d159757
+  Inbound Maya KKB College Hindi     df99f501-e636-4f3d-80dc-e06e82240082
+  KKB Kannada Inbound Signals        f38da775-c572-4a50-9340-fe1f42c43901
+  Maya Inbound Signals               1c24feda-a584-4012-a865-fa8f950089df
+  KKB Inbound Hindi 14072026         08001508-0146-467b-a35f-e8754a7aeff5
+  KKB Hindi Inbound Signals          3f521174-574d-43ca-a9be-081849373c18
+
+
+================================================================================
+TRAPS
+================================================================================
+
+1. EMPTY VALUES ARE NOT CONSISTENT ACROSS BOTS.
+   DKB writes the literal string "Not Available". The seeker bots leave
+   location and college_name as empty strings. contact_memory is
+   "Not Available" everywhere. The bots read these strings literally, so
+   match each bot's own convention per field rather than picking one.
+
+2. recommendations IS A STRING, NOT AN OBJECT.
+   It is a JSON array serialised into a string inside agent_args. Passing a
+   real array may not be read.
+
+3. CHECK job_id RESOLVES BEFORE SENDING.
+   219 apply attempts failed with "Job not found" and 456 with "Invalid or
+   missing profile_id" - 79% of all apply failures are breakages like these,
+   not people changing their minds.
+
+4. phoneNumber ON DKB IS camelCase.
+   Every other key is snake_case. It is also empty in practice; the number
+   that gets dialled is the contact's phone, not this field.
+
+5. THE BOTS DECLARE ALMOST NO OUTPUT FIELDS.
+   15 of 22 agents have output_fields empty, so the fields that come back
+   (drop_reason among them) are invented by the summariser rather than
+   specified. If you want reliable structured output, declare it in
+   output_fields - the DKB bots do, with 38 keys, and their data is far
+   cleaner as a result.
