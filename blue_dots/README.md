@@ -19,6 +19,10 @@ Everything else is grouped.
 | `backfill_fields.py` | Recompute fields on rows already pushed |
 | `build_seeker_journey.py` / `build_provider_journey.py` | Roll the call tables up to one row per person |
 | `call_confidence.py` / `score_confidence.py` | The call confidence score, and the job that writes it |
+| `set_pause_status.py` | Sets `bluedot_items.pause_status` from the Operation Rozgar workbook's Archive tabs |
+| `score_job_urgency.py` | `job_urgency_score` on unpaused postings — age and applications |
+| `match_seekers.py` | `seeker_job_matches` — seeker↔job fit on role, distance, qualification, experience |
+| `build_campaign_input.py` | Turns those two scores into a contact CSV ready to upload to Raya |
 | `load_bluedot.py` | Loads the Blue Dot S3 dumps into `public.bluedot_*` |
 | `load_inbound.py` | Inbound calls, which come through no batch |
 | `bot_schemas.py` | Per-bot `agent_args` schemas, with `--check` against Raya |

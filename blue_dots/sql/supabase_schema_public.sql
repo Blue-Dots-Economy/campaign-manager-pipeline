@@ -45,6 +45,9 @@ create table if not exists public.bluedot_items (
     updated_at       timestamptz,
     item_state       jsonb       not null default '{}'::jsonb,
     loaded_at        timestamptz not null default now(),
+    -- OURS, not the platform's: 'Y' = paused, NULL = active. The S3 sync
+    -- upserts and never sends this column, so it survives a re-load.
+    paused           text,
     primary key (instance, item_id),
     constraint items_created_by_fk
         foreign key (instance, created_by) references public.bluedot_users (instance, id)
@@ -111,7 +114,10 @@ select instance, item_id, lifecycle_status, created_by, lat, lng, is_default_geo
        nullif(item_state ->> 'natureOfJob', '')      as nature_of_job,
        (item_state ->> 'positions')::int             as positions,
        nullif((item_state ->> 'salaryMin')::numeric, 0) as salary_min,
-       nullif((item_state ->> 'salaryMax')::numeric, 0) as salary_max
+       nullif((item_state ->> 'salaryMax')::numeric, 0) as salary_max,
+       -- manual pause, set by us and never by the S3 sync; see
+       -- sql/alter_job_paused.sql for why it lives on the table
+       paused
 from public.bluedot_items
 where item_domain = 'provider';
 

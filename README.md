@@ -37,6 +37,12 @@ Everything takes `--dry-run`: it writes CSVs and touches nothing remote.
     python main.py --dry-run --batch-id 2777 --campaign-name kkb_up_sept21
     python bot_schemas.py --check              # bot input schemas vs Raya
 
+    # scoring, in the order it has to run
+    python set_pause_status.py --dry-run       # which jobs are retired
+    python score_job_urgency.py --dry-run      # urgency on what is left
+    python match_seekers.py --dry-run          # seeker <-> job fit
+    python build_campaign_input.py --jfc Hubli-Dharwad --limit 500
+
     cd purple_dots
     python load_purple.py --dry-run --batch 3018
 
