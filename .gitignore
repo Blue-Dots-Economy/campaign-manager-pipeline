@@ -24,3 +24,11 @@ __pycache__/
 # generated CSVs and caches
 **/data/*.csv
 **/*_cache.json
+
+# Documentation generator and its output. Not pipeline: it reads the live
+# schema and the source AST to describe columns, and nothing imports it.
+# The generated files go too - keeping the output without the generator
+# leaves docs nobody can refresh.
+**/describe_columns.py
+**/docs/columns.md
+**/docs/column_comments.sql
