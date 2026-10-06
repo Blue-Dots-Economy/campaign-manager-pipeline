@@ -1,17 +1,23 @@
 # Running the Purple Dots loader
 
-Raya calls -> Supabase. Runs, writes, exits. Needs Docker and three
-credentials; no Python.
+Raya calls -> Supabase. A batch job: it runs, writes, exits. You need
+Docker and three credentials; you do not need Python.
 
-**We all share one live database.** Re-running is safe - rows upsert on
-`call_id`, so a second load gives `0 new`. A run **without `--batch`** is
-not: it restores ~950 test rows deleted on purpose on 30 Sept 2026, with no
-undo. Say in the channel which batch you are loading - we share one service
+## Everyone shares one database
+
+ **Re-running is safe** - rows upsert on `call_id`,
+so loading a batch twice gives `0 new`.
+
+ **A wrong scope is not** - a run
+without `--batch` restores ~950 test rows that were deleted on purpose on
+30 September 2026, and there is no undo.
+
+Say in the team channel which batch you are loading. We share one service
 key, so the row count is the only record of who ran what.
 
 ## Setup, once
 
-`.env`:
+Create `.env`:
 
 ```
 SUPABASE_URL=https://blzzscjqvaqfwxzlqtfn.supabase.co
@@ -19,54 +25,56 @@ SUPABASE_SECRET_KEY=<Purple Dots service key>
 RAYA_API_KEY=<ALIMCO / Purple Dots Raya key>
 ```
 
-The URL is correct as written; ask the data team for the keys. The Supabase
-one bypasses row-level security - never commit it or pass it to
-`docker build`, since anything baked into an image travels with it.
-
 ```
+cd purple_dots
 docker build -t purple-dots .
 ```
 
-Rebuild whenever you pull. Tables exist already; on a fresh project run
-`sql/create_purple_dots.sql`.
+Rebuild whenever you pull. The tables already exist; on a fresh Supabase
+project run `sql/create_purple_dots.sql` first.
 
-## Every run
+## Every run: three commands
+
+**1. Check if everything reachable** 
+```
+docker run --rm --env-file .env purple-dots --check
+```
 
 ```
-docker run --rm --env-file .env purple-dots --check     # 2s, all connections
-docker run --rm --env-file .env purple-dots --batches   # what is new
-docker run --rm --env-file .env purple-dots --batch 3031
+Raya
+  [ok ] api reachable            4 agents visible
+  [ok ] Purple Dots agents       2 of 2 found
+Supabase
+  [ok ] purple_dots_calls        877 rows
+  [ok ] purple_dots_connections  0 rows
+  [ok ] write permission
+```
+
+**2. List of batches**
+
+```
+docker run --rm --env-file .env purple-dots --batches
 ```
 
 ```
 batch    dialled  total   in db  created     name
+3018         223    307     660  2026-09-30  'Basti_1_Final'
 3031          83    100     186  2026-10-01  'Tmf_Basti_1oct'
 2992           1      1       0  2026-09-30  'purplec'   <-- NOT LOADED
+1852           0      1       0  2026-06-26  'Purple dot test'   never dialled
 ```
 
-Judge a batch by **dialled**, not by its name - a real campaign calls
-hundreds, the test batches called one. **in db** means it is done;
-`<-- NOT LOADED` rows are the only ones worth a look. Real batches as of
-6 Oct 2026: **2385, 2441, 3018, 3031**. Unsure? `--dry-run --batch N` does
-everything except the write.
+**dialled** is contacts actually called - judge a batch by that, not by its
+name.
+**in db** means if it is done. 
 
-## Two things that look wrong and are not
+**3. Load it.**
 
-`purple_dots_connections 0 rows` - the bot called `connect_provider` once in
-877 calls, with an empty `item_id` on both sides. An accurate zero.
+```
+docker run --rm --env-file .env purple-dots --batch 3031
+```
 
-No files are written, and rows carry no names or phone numbers by design.
-`--csv` writes to `/app/data` if you need them on disk; mount it.
+Then re-run `--batches` and check `in db` went up. 
 
-## When something goes wrong
 
-| what you see | what it means |
-|---|---|
-| `missing: RAYA_API_KEY` | no `--env-file .env`, or the file is short a line |
-| `Purple Dots agents 0 of 2 found` | Raya key is for the wrong account |
-| `purple_dots_calls does not exist` | run `sql/create_purple_dots.sql` |
-| `write permission FAIL 403` | that is the anon key, not the service key |
-| `points at the Blue Dots project` | wrong project; it stops rather than write disability data into the seeker database |
-| `0 new` | already loaded. Nothing was written |
 
-Anything else: `--check` first. It fails in two seconds, not twenty minutes.
