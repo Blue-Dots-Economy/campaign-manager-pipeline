@@ -63,6 +63,7 @@ batch    dialled  total   in db  created     name
 
 **dialled** is contacts actually called - judge a batch by that, not by its
 name.
+
 **in db** means if it is done. 
 
 **3. Load it.**
