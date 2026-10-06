@@ -33,7 +33,5 @@ __pycache__/
 **/docs/columns.md
 **/docs/column_comments.sql
 
-# Root README and the pause-list spreadsheet: kept on disk, out of the repo.
-# set_pause_status.py reads the xlsx, so do not delete it locally.
-/README.md
+# The pause list. set_pause_status.py reads it, so keep it on disk.
 /operation_rozgar_jobs_final.xlsx
