@@ -1,0 +1,4 @@
+# CI and local test tooling. Not installed in the image (see .dockerignore).
+-r requirements.txt
+pytest==9.1.1
+ruff==0.16.10

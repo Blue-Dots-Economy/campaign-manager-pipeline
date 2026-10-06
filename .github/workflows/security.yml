@@ -1,0 +1,37 @@
+name: security
+# Thin caller into the shared scan in bluedots-automation, as in the other repos.
+# Covers the WHOLE repository (blue_dots/ and purple_dots/), because a secret
+# committed anywhere here is a secret in the repo: this is a public repository,
+# and both pipelines handle a Raya key and a Supabase service key.
+#
+# language: none, not python. The shared workflow's python audit runs uv-secure
+# against uv.lock, and this repo has requirements.txt files and no uv.lock, so
+# that step would audit nothing while showing a green tick. Trivy's filesystem
+# scan reads requirements.txt directly and is the dependency coverage here.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 1 * *"
+  workflow_dispatch:
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to Security > Code scanning
+      packages: read # pull image-refs from GHCR (none are passed here)
+    uses: Blue-Dots-Economy/bluedots-automation/.github/workflows/security-scan.yml@d6a39c5b22be14b4b4aeaa78fc1d86c1f67bb555 # feature 2026-09-25 -- repin to @main once promoted
+    with:
+      language: none
+      run-gitleaks: true
+      # Report-only until the first run's findings are known.
+      block: false
