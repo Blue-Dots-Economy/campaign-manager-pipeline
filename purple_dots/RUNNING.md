@@ -12,9 +12,6 @@ so loading a batch twice gives `0 new`.
 without `--batch` restores ~950 test rows that were deleted on purpose on
 30 September 2026, and there is no undo.
 
-Say in the team channel which batch you are loading. We share one service
-key, so the row count is the only record of who ran what.
-
 ## Setup, once
 
 Create `.env`:
