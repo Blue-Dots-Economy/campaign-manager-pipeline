@@ -237,11 +237,16 @@ def tools_used(raw: Any) -> list[str] | None:
 def make_connections(call: dict[str, Any], call_id: str) -> list[dict[str, Any]]:
     """One row per provider connection made on this call.
 
-    A call that connects usually connects to TWO providers - 8 of the 9 that
-    got that far did - and the call row can only hold a count. The provider
-    ids live in the connect_provider tool call and nowhere else, so without
-    this the only record of who a beneficiary was actually put in touch with
-    is the number 2.
+    The call row can only hold a count. The provider ids live in the
+    connect_provider tool call and nowhere else, so without this the only
+    record of who a beneficiary was actually put in touch with is a number.
+
+    As of 5 Oct 2026 this returns nothing, and that is correct rather than
+    broken. Across 824 loaded calls connect_provider fires once, and that one
+    call sent item_id = "" on both source and target - so there is no provider
+    to record. The guard below skips it rather than writing a connection to
+    nobody. Three other calls report providers_connected = 3 with an entirely
+    empty transcript, which is the summariser inventing an outcome.
 
     Same shape as kkb_applications on the Blue Dots side, for the same
     reason: the count belongs on the call, the relationships belong in their
@@ -312,9 +317,14 @@ def make_row(
     cid = contact.get("contact_id")
     call_id = str(call.get("uuid"))
 
-    phone = (contact.get("phone") or args.get("contact_phone")
-             or prof.get("mobile_number")
-             or call.get("caller_no") or call.get("to_number"))
+    # There is deliberately no phone variable here. An earlier version
+    # assembled one from contact.phone / agent_args.contact_phone /
+    # caller_no / to_number and then never used it, because this table has no
+    # phone column. In a module whose whole purpose is to not carry personal
+    # data, a ready-made phone number sitting in scope is one careless
+    # `"phone": phone,` away from undoing that - so it is gone rather than
+    # left unused. If a phone is ever genuinely needed, take it from the
+    # platform via profile_item_id instead of storing it again here.
 
     return {
         "call_id": call_id,
@@ -390,11 +400,10 @@ def make_row(
         "connect_provider_api_successful": yes_no(out.get("connect_provider_api_successful")),
         "providers_connected": whole(out.get("providers_connected")),
 
-        # I - QUALITY. call_value_score and looking_for_details have no source
-        # either; same treatment as section E.
-        # call_value_score has no source anywhere: not in call_output, not
-        # in any tool call. The sheet has it on every row, so it is scored
-        # by whoever builds the sheet rather than by the bot.
+        # I - QUALITY. Read from call_output, but the bot has never once
+        # filled it: 0 of 824 rows. The master sheet carries a value on every
+        # row, so whoever builds the sheet scores it by hand. Kept wired up so
+        # it populates by itself if the bot is ever asked to return it.
         "call_value_score": number(out.get("call_value_score")),
 
         "drop_reason": clean(out.get("drop_reason")),

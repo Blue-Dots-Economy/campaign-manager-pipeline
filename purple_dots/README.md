@@ -42,8 +42,12 @@ there is no seeker, no employer and no job.
 
 ## The output sheet
 
-`data/Purple_Dots_Basti_Master Sheet - Purple_Dots_Day1.csv` is the format,
-copied here from the Blue Dots folder where it did not belong.
+The Basti master sheet is the format. **The file is no longer kept here** — it
+carried `contact_name`, `contact_phone`, `beneficiary_name`, `age`, `gender`
+and `address` for 16 people, which is exactly what this project exists not to
+store. It was needed once, to map `sheet_call_id` to Raya's call uuids by
+phone; those 16 mappings are in `purple_dots_calls.sheet_call_id` and the
+sheet was deleted on 6 Oct 2026. Ask the sheet owner if you need it again.
 
 It carries a **two-row header**: row 1 names nine sections (`A — PASSTHROUGH`
 through `I — QUALITY`), row 2 names the 44 fields. Anything reading or writing

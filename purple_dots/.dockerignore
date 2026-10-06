@@ -1,0 +1,20 @@
+# Everything is excluded, then the pipeline is added back. An allow-list,
+# because the default on this folder is the wrong way round: data/ holds the
+# Basti master sheet - real names, phone numbers, ages, addresses and
+# disability percentages - and a COPY . would bake that into an image layer
+# where it survives even if a later layer deletes it.
+*
+
+!load_purple.py
+!raya_client.py
+!transform_purple.py
+!requirements.txt
+!sql/
+!README.md
+
+# Never, under any circumstances:
+#   .env                 the Raya key and the Supabase service key
+#   data/                the Basti sheet, and generated CSVs
+#   describe_columns.py  documentation generator, not pipeline
+#   docs/                generated output
+#   __pycache__/
