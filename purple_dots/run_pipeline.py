@@ -1,28 +1,12 @@
-"""The whole Purple Dots pipeline, in one command.
+"""The whole Purple Dots pipeline.
 
-    python run_pipeline.py --dry-run     # rehearse every stage, write nothing
-    python run_pipeline.py               # the real thing
+    python run_pipeline.py --dry-run
+    python run_pipeline.py
 
-Four stages, in order:
-
-    1. check     every connection and table, before anything is fetched
-    2. outbound  calls the bots made, via batches
-    3. inbound   calls people made to the bots
-    4. platform  the S3 dump: users, items, actions
-
-STAGES SKIP THEMSELVES WHEN THEY CANNOT RUN
-Stage 4 needs campaign-manager credentials that are not configured yet, so
-it reports 'skipped' and the run still succeeds. The alternative - failing
-the whole pipeline because one optional source is not set up - teaches
-people to ignore the exit code, which is the one thing it must not do.
-
-A STAGE FAILING DOES NOT STOP THE REST
-Inbound failing should not cost you the outbound calls; they are separate
-sources writing separate rows. The exit code is the number of stages that
-failed, and the summary says which.
-
-Stage 1 is the exception. If nothing is reachable there is no point
-fetching for twenty minutes to find out, so a failed check stops the run.
+Stages: check, outbound, inbound, platform. A failed check stops the run;
+any other failure leaves the remaining stages to run. Exit code is the
+number of stages that failed. The platform stage skips itself when its
+credentials are unset.
 """
 import argparse
 import os
@@ -75,8 +59,7 @@ def main():
 
     results = []
 
-    # 1. Check. Not given --dry-run: it only ever reads, and a rehearsed
-    #    connection check would be worth nothing.
+    # No --dry-run: the check only reads.
     if "check" not in args.skip:
         ok, secs, note = run("1/4  check - connections and tables",
                              ["load_purple.py", "--check"], dry_run=False)
@@ -95,8 +78,7 @@ def main():
                                         ["load_purple.py", "--inbound"],
                                         args.dry_run)))
 
-    # 4. Platform. Optional: the campaign-manager credentials are separate
-    #    from the Raya and database ones and may not exist on this machine.
+    # Optional: its credentials are separate from Raya's and the database's.
     if "platform" not in args.skip:
         missing = [n for n in ("BASE_URL", "KEYCLOAK_URL", "CLIENT_SECRET")
                    if not os.getenv(n)]

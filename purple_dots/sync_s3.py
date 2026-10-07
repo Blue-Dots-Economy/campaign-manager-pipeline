@@ -1,37 +1,19 @@
-"""Stream the Purple Dots platform dump from S3 into Supabase. No files.
+"""Stream the Purple Dots platform dump from S3 into Postgres. No files.
 
-    python sync_s3.py --check            # auth, snapshot metadata, nothing else
-    python sync_s3.py --dry-run          # stream and count, write nothing
-    python sync_s3.py                    # stream and upsert
+    python sync_s3.py --check      auth and snapshot metadata
+    python sync_s3.py --dry-run    stream and count, write nothing
+    python sync_s3.py              stream and upsert
 
 Run sql/create_purple_dots_s3.sql once first.
 
-NOTHING IS WRITTEN TO DISK
-The three .jsonl files are read straight off the pre-signed URL, a line at a
-time, and pushed to Supabase in chunks as they arrive. A full dump never
-exists locally, so there is nothing to forget to delete and nothing to leak
-from a laptop. Memory stays flat regardless of dump size - only the id sets
-used for reference checking are held, not the rows.
-
-WHAT THIS IS, AND WHAT IT IS NOT
-load_purple.py loads CALLS - what happened on the phone. This loads the
-PLATFORM: the people registered, the items created, and the actions taken on
-them. They meet only through profile_item_id.
-
-THE DUMP IS NON-PII BY DESIGN
-The exporter masks before it writes: age arrives as '2***', gender as
-'D***'. Nothing here recovers them - they never left the platform.
-
-TWO STEPS TO GET IN
+Two steps, neither using AWS credentials:
   1. POST {KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/token
-     grant_type=client_credentials  ->  a short-lived access_token
-  2. GET  {BASE_URL}/v1/campaign/dump  with that token
-     ->  three pre-signed S3 URLs, fetched WITHOUT an auth header
+     grant_type=client_credentials. Must be a SYSTEM token; a user token
+     gets 403 NOT_SYSTEM_CLIENT.
+  2. GET {BASE_URL}/v1/campaign/dump -> three pre-signed S3 URLs, fetched
+     WITHOUT an auth header.
 
-The token must be a SYSTEM token. A coordinator or user token is rejected
-with 403 NOT_SYSTEM_CLIENT, and that is the usual first failure.
-
-CREDENTIALS ARE NOT SET YET. See .env.example.
+Rows carry no names: the exporter masks age as '2***' and gender as 'D***'.
 """
 import argparse
 import gzip
@@ -121,12 +103,10 @@ def check_snapshot(files, allow_torn):
 
 
 def stream_records(url):
-    """Yield one parsed object per line, straight off the wire.
+    """One parsed object per line, off the wire.
 
-    Pre-signed, so NO Authorization header - adding one makes S3 refuse.
-    The files are gzip but named .jsonl, so the magic bytes are sniffed
-    rather than trusted; peek() leaves them in the buffer for the reader
-    that follows.
+    Pre-signed, so no Authorization header - adding one makes S3 refuse.
+    Files are gzip but named .jsonl, so the magic bytes are sniffed.
     """
     with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT) as resp:
         if resp.status_code != 200:
@@ -173,8 +153,7 @@ def item_row(r, instance):
         "lifecycle_status": r.get("lifecycle_status"),
         "created_by": r.get("created_by"), "lat": lat, "lng": lng,
         "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
-        # Kept whole: the item schema is not settled, and a column per key
-        # means a migration every time the platform adds a field.
+        # Kept whole: a column per key means a migration per new field.
         "item_state": r.get("item_state") or {},
     }
 
@@ -191,8 +170,7 @@ def action_row(r, instance):
     }
 
 
-# Order matters: users and items are streamed first so that the id sets are
-# populated before item_actions is checked against them.
+# Users and items first: their ids are needed to check item_actions.
 SPECS = (
     ("user",         "purple_users",   "instance,user_id",   user_row, "user_id"),
     ("items",        "purple_items",   "instance,item_id",   item_row, "item_id"),
@@ -201,9 +179,8 @@ SPECS = (
 
 
 def push(table, conflict, rows):
-    """Upsert a chunk. db.upsert collapses duplicate keys for us - Postgres
-    rejects a statement that updates a row it just inserted (21000), and the
-    dump does contain repeats."""
+    """Upsert a chunk. db.upsert collapses the dump's duplicate keys, which
+    Postgres rejects within one statement (21000)."""
     return db.upsert(table, rows, conflict, chunk=CHUNK)
 
 
@@ -250,8 +227,7 @@ def main():
             if id_field in ids:
                 ids[id_field].add(row[id_field])
             elif row.get("item_id") and row["item_id"] not in ids["item_id"]:
-                # A torn snapshot shows up here: an action whose item never
-                # arrived. Counted, not dropped - the row is still a fact.
+                # Torn snapshot: an action whose item never arrived.
                 dangling += 1
             batch.append(row)
             total += 1

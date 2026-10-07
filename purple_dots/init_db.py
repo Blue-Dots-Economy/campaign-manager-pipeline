@@ -1,11 +1,11 @@
-"""Create the Purple Dots tables in a local Postgres.
+"""Create the Purple Dots tables.
 
     docker compose up -d
-    $env:DATABASE_URL = "postgresql://purple:purple@localhost:5433/purple"
     python init_db.py
 
-The .sql files in sql/ are the only description of the schema; this applies
-them. Re-runnable - every statement is CREATE ... IF NOT EXISTS.
+Re-runnable. Applies sql/, and turns off row level security on tables
+created before 7 Oct 2026 - CREATE TABLE IF NOT EXISTS will not revisit
+them, and RLS with no policy blocks every INSERT from a non-owner.
 """
 import pathlib
 
@@ -18,17 +18,11 @@ def main():
     db.require_url()
     print(db.describe())
 
-    # The .sql files grant to service_role, anon and authenticated - roles
-    # Supabase provided and a bare Postgres does not. Creating them NOLOGIN
-    # is cheaper than editing every grant out, and keeps the files readable
-    # as the one description of the schema.
+    # sql/ grants to roles Supabase provides and plain Postgres does not.
     db.ensure_supabase_roles()
     print("  ok    supabase roles (service_role, anon, authenticated)")
 
-    # Tables created before 7 Oct 2026 carry row level security with no
-    # policy, which blocks every INSERT from anyone but the owner. The .sql
-    # files no longer enable it, but CREATE TABLE IF NOT EXISTS will not
-    # revisit a table that already exists, so it is turned off here.
+
     for table in ("purple_dots_calls", "purple_dots_connections"):
         if db.disable_rls(table):
             print(f"  ok    row level security off on {table}")

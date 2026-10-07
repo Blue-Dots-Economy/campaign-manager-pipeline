@@ -1,29 +1,6 @@
-"""Postgres access for the Purple Dots pipeline.
+"""Postgres access. DATABASE_URL is the only setting.
 
-One connection string, DATABASE_URL:
-
-    postgresql://purple:purple@localhost:5433/purple
-
-WHY THERE IS NO SUPABASE PATH ANY MORE
-There was one until 7 Oct 2026, and the two backends were kept in step and
-verified field-for-field. Purple Dots then moved off Supabase entirely, and
-a second path nobody exercises is not a safety net - it is code that rots
-until the day someone relies on it. The git history has it if it is ever
-needed again.
-
-What that decision cost, and what to keep in mind:
-
-  * There is no hosted copy. docker-compose.yml names a volume so the data
-    survives `docker compose down`, but `down -v` still removes it and
-    nothing is backed up anywhere.
-  * Nothing is lost if it goes. Raya holds every call, so a destroyed
-    database is a re-run of run_pipeline.py - hours, not data.
-  * DDL runs from here now. Supabase had no API for it, so its tables were
-    created by pasting sql/ into a dashboard; init_db.py applies the same
-    files directly.
-
-The functions below are what the pipeline uses. Nothing else in it builds
-SQL or opens a connection.
+The Supabase build is on `master`; keep the two in step.
 """
 import os
 from contextlib import contextmanager
@@ -36,7 +13,7 @@ except ImportError:
 
 
 def describe():
-    """One line naming the database, for the top of a run's output."""
+    """One line naming the database."""
     url = os.getenv("DATABASE_URL", "")
     if not url:
         return "(DATABASE_URL not set)"
@@ -89,18 +66,10 @@ def column_values(table, column):
 
 
 def can_write(table):
-    """(ok, detail). Proves the connection can INSERT, then rolls it back.
+    """(ok, detail). INSERTs and rolls back.
 
-    It has to be an insert. The first version ran an update matching no
-    rows, which passes for a user who cannot insert at all: an UPDATE whose
-    WHERE matches nothing touches no row, so no policy and no column
-    privilege is ever evaluated. Against a table with row level security
-    enabled, that probe reported "write permission ok" while every real
-    write failed with "new row violates row-level security policy". A
-    preflight that passes when the run will fail is worse than no preflight.
-
-    Nothing is left behind: the insert is rolled back, and the sentinel
-    call_id would be unique anyway.
+    Must be an INSERT: an UPDATE matching no rows evaluates no policy or
+    column privilege, so it passes for a user who cannot insert.
     """
     try:
         if psycopg2 is None:
@@ -108,10 +77,7 @@ def can_write(table):
         conn = psycopg2.connect(require_url())
         try:
             with conn.cursor() as cur:
-                # Fill every NOT NULL column that has no default. Asked of
-                # the catalogue rather than hardcoded: the schema gains
-                # columns, and a fixed list would start failing for the
-                # wrong reason.
+                # every NOT NULL column without a default
                 cur.execute(
                     "select column_name from information_schema.columns "
                     "where table_schema = 'public' and table_name = %s "
@@ -167,12 +133,7 @@ def upsert(table, rows, conflict, chunk=200):
 
 
 def disable_rls(table):
-    """Turn row level security off, if it is on. True when it changed.
-
-    Only the owner may do this, so it belongs in init_db.py rather than in
-    the loader's path - the loader runs as a least-privilege user and would
-    only fail.
-    """
+    """Turn RLS off if on. True when changed. Owner only."""
     with _conn() as conn, conn.cursor() as cur:
         cur.execute("select relrowsecurity from pg_class where relname = %s",
                     (table,))
@@ -184,13 +145,9 @@ def disable_rls(table):
 
 
 def ensure_supabase_roles():
-    """Create the roles the sql/ files grant to.
+    """Create service_role, anon, authenticated as NOLOGIN grant targets.
 
-    The schema was written for Supabase, where service_role, anon and
-    authenticated exist already. They are kept as grant targets - NOLOGIN,
-    so nothing can connect as them - rather than editing the grants out,
-    because the same files still describe the schema and a local copy that
-    has drifted is worse than none.
+    sql/ grants to them; Supabase provides them, plain Postgres does not.
     """
     with _conn() as conn, conn.cursor() as cur:
         for role in ("anon", "authenticated", "service_role"):

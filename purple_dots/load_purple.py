@@ -1,31 +1,17 @@
-"""Loads Purple Dots calls from Raya into purple_dots_calls.
+"""Load Purple Dots calls from Raya into Postgres.
 
-Writes to the PURPLE DOTS Supabase project only. The URL and key come from
-this folder's own .env, and nothing here imports from the Blue Dots pipeline -
-see README for why that separation is physical rather than just a convention.
+    python load_purple.py --check          connections and tables
+    python load_purple.py --batches        what exists, what is loaded
+    python load_purple.py                  load every batch
+    python load_purple.py --inbound        calls people made in
+    python load_purple.py --dry-run        build rows, write nothing
 
-ONLY CALLS THAT CAME THROUGH A BATCH ARE LOADED.
-This walks /api/batch/{id}/contacts, so a call with no batch is not merely
-filtered out - it is never fetched. That matters: 933 batch-less pilot and
-demo calls were deleted from this table on purpose on 30 Sept 2026, and an
-earlier version of this script walked /api/call?agent_id= instead, which
-returns every call an agent made, batch or not. It then dropped the unwanted
-ones in memory, so the only thing standing between a normal run and
-restoring all 933 was remembering to pass --batch. Now there is nothing to
-remember. (That older shape made sense when written - the Raya key showed
-zero Purple Dots batches, so there was nothing else to walk. There are four
-now.)
+Only calls that came through a batch are fetched. 933 batch-less pilot calls
+were deleted on 30 Sept 2026; walking /api/batch/{id}/contacts rather than
+/api/call?agent_id= makes them unreachable rather than merely filtered.
 
---batch still narrows to specific batches, and now also skips fetching the
-others, which is the difference between four API calls and forty.
-
-    python load_purple.py --dry-run            # builds rows, touches nothing
-    python load_purple.py --dry-run --limit 20
-    python load_purple.py                      # pushes every batch
-    python load_purple.py --batch 3031         # one batch only
-    python load_purple.py --agent <id>         # one agent only
-    python load_purple.py --batches            # what exists, and what is loaded
-    python load_purple.py --agents             # just list what is out there
+--inbound is the exception: an inbound call has no batch, so it walks
+/api/call?agent_id= and keeps the ones is_inbound() identifies.
 """
 import argparse
 import collections
@@ -61,12 +47,7 @@ OUT_DIR = "data"
 # all, so this list almost certainly does NOT cover Purple Dots production.
 # See README - resolving that needs the right Raya key, not more code.
 def _env_set(name, default=""):
-    """A comma or space separated list from the environment, or the default.
-
-    Values that differ per deployment - which bots, which numbers - read from
-    here so a second environment needs a different .env rather than a
-    different build.
-    """
+    """Comma/space separated list from the environment, or the default."""
     raw = os.getenv(name) or default
     return {x.strip() for x in raw.replace(",", " ").split() if x.strip()}
 
@@ -110,47 +91,22 @@ EXCLUDED = {
     "1e8faf6a-db15-4796-81f1-55b9e9aab358",   # Testing Agent- Purple Dots
 }
 
-# Bots that answer calls. Kept apart from AGENTS because the two are fetched
-# completely differently: an outbound call belongs to a batch, an inbound one
-# cannot, so --inbound walks /api/call?agent_id= instead.
-#
-# ONE BOT, confirmed by the sheet owner on 7 Oct 2026. 'Testing Agent- Purple
-# Dots' (1e8faf6a) also answers calls - 225 of them - and is deliberately NOT
-# here. It is what its name says. Its configuration settles it rather than
-# the name doing so: it has no output_instructions and an empty tool list, so
-# its calls produce a transcript and nothing else, while this bot has 8,902
-# characters of output instructions, 18,340 of tools, and has already
-# recorded 43 provider connections in 26 calls.
-#
-# Two numbers are involved, which is the thing to check if this ever looks
-# wrong: 918044484499 reaches the testing bot, 917946350861 reaches this one.
+# Bots that answer calls. 'Testing Agent- Purple Dots' (1e8faf6a) also has
+# 225 inbound calls but no output_instructions and no tools, so they carry a
+# transcript and nothing else. DID 917946350861 reaches this bot,
+# 918044484499 the testing one.
 INBOUND_AGENTS = _env_map("PD_INBOUND_AGENTS", {
     "a1567240-052e-4ec0-be49-be2ca2d58ea6": "Purple-Dots-Inbound-061020261110",
 })
 
-# Numbers the team rang the inbound bots from while testing. Their calls are
-# real in Raya and must not count as beneficiary traffic, so their rows are
-# written with test_flag = true rather than dropped - the same decision the
-# Blue Dots pipeline made, and for the same reason: a deleted row makes our
-# count disagree with Raya's forever, and a flag set by hand in Supabase is
-# overwritten by the next upsert.
-#
-# Given by the sheet owner on 7 Oct 2026. Everything else counts as a real
-# caller - including 7946350287, which made 67 calls in two days and looks
-# like testing but was not named, so it is not guessed at.
-#
-# Extend with PD_TEST_PHONES in .env rather than editing this; the set below
-# is the floor, not the whole list.
+# Team test numbers. Their inbound calls get test_flag = true rather than
+# being dropped, so the row count still reconciles with Raya.
 TEST_PHONES: set[str] = _env_set("PD_TEST_PHONES", "8065295804")
 
 
 def is_test_caller(call):
-    """True if this inbound call came from a known team number.
-
-    Compares on digits only. Raya returns the same number as '8065295804'
-    from one bot and '+918065295804' from another, and a string compare
-    would quietly flag neither.
-    """
+    """Inbound call from a team number. Digits only - Raya returns both
+    '8065295804' and '+918065295804'."""
     known = TEST_PHONES
     if not known:
         return False
@@ -175,13 +131,6 @@ def env(need_db=True):
                if in_docker else
                "copy .env.example to .env and fill it in.")
         raise SystemExit(f"missing: {', '.join(missing)}\n{how}")
-    # A wrong-database write is the failure this whole folder exists to
-    # prevent. The old guard compared SUPABASE_URL against the Blue Dots
-    # project id; with Postgres there is no equivalent to check against, so
-    # the separation now rests entirely on DATABASE_URL pointing somewhere
-    # Blue Dots does not use. Blue Dots talks PostgREST to its own Supabase
-    # project and reads no DATABASE_URL at all, so the two cannot collide by
-    # configuration alone - but there is no longer a check that says so.
     return api
 
 
@@ -260,22 +209,11 @@ def check(api_key):
 
 
 def list_batches(api_key):
-    """Every batch, with whether it has already been loaded.
+    """Every batch, with how many answered and how many rows are stored.
 
-    Without this the only record of which batches are real lives in a comment
-    on AGENTS, which nobody running the container ever sees. So the tool
-    answers the question instead of the operator having to know.
-
-    THE COLUMN IS 'answered', NOT 'dialled'
-    Raya's completed_contacts counts people who PICKED UP, not people who
-    were called. Batch 3155 shows 646 of 1098 and every one of those 1098
-    was dialled - 452 of them simply did not answer. Calling it 'dialled'
-    cost an afternoon: a batch reading 646/1098 looks half-finished, and
-    it is not.
-
-    What it is good for is spotting a trial. A batch nobody answered may
-    still be real; a batch with one contact in it is a smoke test. Read it
-    alongside 'total'.
+    'answered' is completed_contacts, which counts who PICKED UP - not who
+    was called. 646 of 1098 means all 1098 were dialled and 452 did not
+    answer.
     """
     loaded = collections.Counter()
     try:
@@ -329,39 +267,12 @@ def _ids(name):
 
 
 def classify(listed):
-    """Decide what to load and what to flag. Returns (ids, flagged).
+    """Returns (ids to load, ids to flag).
 
-    Every batch anyone answered is loaded. PD_TEST_BATCHES only decides
-    whether its rows carry test_flag = true.
-
-        on PD_TEST_BATCHES  ->  loaded, flagged
-        anything else       ->  loaded clean
-
-    ONE LIST, NOT TWO
-    An earlier version also kept PD_REAL_BATCHES and treated anything in
-    neither as suspect. It was safer on paper and wrong in practice: every
-    new campaign needed a config edit before its data counted, which is a
-    step that gets forgotten exactly when things are busy. A new campaign
-    now just works.
-
-    The cost is that a new TEST batch loads until someone adds it to the
-    list. That is the right way round - test batches are rare, small and
-    known about in advance, while campaigns are the thing the pipeline
-    exists for.
-
-    FLAGGED, NOT SKIPPED
-    A batch wrongly listed here would otherwise go missing silently, and
-    nobody notices absent calls for months. Flagged is recoverable in one
-    UPDATE and the rows stay countable against Raya. Reporting reads
-    test_flag, so flagged traffic stays out of the numbers either way.
-
-    THE LIST IS SET ONCE
-    PD_TEST_BATCHES lives in .env, not here, and is touched only when a new
-    test batch appears - which is rare. A new CAMPAIGN needs no edit at all:
-    it loads clean and counts immediately.
-
-    Inbound calls from a team number are flagged the same way, but per call
-    rather than per batch, in main().
+    Every answered batch loads. PD_TEST_BATCHES only sets test_flag = true,
+    so a wrong entry is one UPDATE to undo rather than silently absent
+    calls. Nothing in the data separates a trial from a campaign - 'purplec'
+    answered 1, batch 2441 answered 6 and is real.
     """
     test = _ids("PD_TEST_BATCHES")
 
@@ -369,15 +280,9 @@ def classify(listed):
     for b in listed:
         if not b["answered"]:
             continue          # nobody picked up - no call_output to load
-        # Deliberately NOT skipping batches that already have rows. A batch
-        # is not finished the moment its first call lands: an old one gains
-        # calls when Raya retries an unanswered contact, which is how three
-        # calls in batch 3018 sat unloaded for a week. Skipping on "has any
-        # rows" meant those later calls could never arrive.
-        #
-        # Nothing is re-fetched as a result. existing_ids() drops every call
-        # already stored before any detail request is made, so including a
-        # loaded batch costs one contacts listing and nothing else.
+        # Batches with rows are NOT skipped: Raya adds retry calls to old
+        # batches, which hid 3 calls in 3018 for a week. existing_ids()
+        # does the skipping, per call.
         load.append(b["id"])
         if b["id"] in test:
             flagged.add(b["id"])
@@ -522,15 +427,9 @@ def main():
         list_batches(api_key)
         return
 
-    # No --batch: list what exists, then load it all, flagging whatever is
-    # named in PD_TEST_BATCHES. Walking only batches removed the 933
-    # batch-less calls, but a test BATCH is still a batch, and nothing in the
-    # data separates one from a real campaign - 'purplec' had one contact,
-    # and batch 2441 had nine and is real. So the list is the judgement, and
-    # it is kept in .env rather than here.
-    # Empty unless classify() fills it. --batch and --inbound both bypass
-    # that branch, and an explicit --batch 2992 is taken at face value: if
-    # someone names a test batch by id they mean to load it as it is.
+    # No --batch: load every batch, flagging those in PD_TEST_BATCHES.
+    # --batch and --inbound bypass classify(), so an explicit id is taken
+    # at face value and nothing is flagged.
     quarantined = set()
     if not args.batch and not args.inbound:
         args.batch, quarantined = classify(list_batches(api_key))
@@ -557,9 +456,7 @@ def main():
             found.extend(inbound)
         print(f"  {len(found)} inbound calls")
         if not found:
-            # Not an error. A day on which nobody rang the bot is a normal
-            # day, and a scheduled run that exits non-zero for it would page
-            # somebody every quiet night until they stopped believing it.
+            # Not an error - a quiet day must not fail a scheduled run.
             print("  nobody called in - nothing to do.")
             return 0
     else:
@@ -570,17 +467,13 @@ def main():
             "Purple Dots account - run --agents - or the batch ids given do "
             "not belong to these agents. See --batches for what exists.")
 
-    # The call-level check, and the reason a re-run is cheap: every uuid
-    # already stored is dropped here, before the one-request-per-call detail
-    # fetch below. It is also what lets a batch be re-walked every time -
-    # Raya keeps adding retry calls to batches long after they look finished.
+    # Drop stored uuids before the one-request-per-call detail fetch.
     seen = existing_ids()
     fresh = [c for c in found if str(c.get("uuid")) not in seen]
     print(f"  {len(found) - len(fresh)} already loaded, {len(fresh)} new")
 
     if args.refresh_days:
-        # Upsert makes re-fetching harmless: the row is overwritten with
-        # whatever Raya says now, which is the point.
+        # Upsert overwrites, so re-fetching is harmless.
         cutoff = (datetime.datetime.now(datetime.timezone.utc)
                   - datetime.timedelta(days=args.refresh_days)).isoformat()
         again = [c for c in found
@@ -608,10 +501,7 @@ def main():
         contact, batch = contacts.get(str(call.get("uuid")), (None, None))
         row = make_row(detail, agent_name=call["_agent_name"],
                        contact=contact, batch=batch)
-        # Set here rather than in make_row: whose numbers are the team's, and
-        # which batches are trials, is loading policy that changes when
-        # someone joins or a campaign runs. The transform stays a pure
-        # function of what Raya returned.
+        # Loading policy, not a property of the call - make_row stays pure.
         if args.inbound and is_test_caller(detail):
             row["test_flag"] = True
         elif str(row.get("batch_id")) in quarantined:
