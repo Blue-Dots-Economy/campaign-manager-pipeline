@@ -1,0 +1,167 @@
+name: Build and Push image (purple-dots)
+# Builds the Purple Dots loader image (purple_dots/Dockerfile) and publishes it
+# to GHCR on a release tag or a manual run - never on a branch push (the org
+# policy from Blue-Dots-Economy/signals-dpg#756). A branch-named tag such as
+# `:main` is mutable and moves under anyone who pulls it; a scheduled job should
+# pin a release tag or an immutable `sha-` tag.
+#
+# Nothing deploys this image yet. It exists so the planned scheduled run can pin
+# an image CI has passed, instead of someone's local `docker build`.
+#
+# Pull requests are covered separately: purple-dots-ci.yaml's `smoke-image` job
+# builds the same Dockerfile WITHOUT pushing and runs it, so a broken Dockerfile
+# is caught in review instead of when a release tag is cut.
+on:
+  push:
+    # Prefixed, because this repo also holds blue_dots/, which may want its own
+    # releases later. purple-dots-v1.2.0 publishes :purple-dots-v1.2.0 and :1.2.0.
+    # GitHub reads this workflow FROM THE TAGGED COMMIT, so a tag cut from a
+    # commit that predates this file will not build.
+    tags: ['purple-dots-v*.*.*']
+  workflow_dispatch:
+    inputs:
+      skip_ci_check:
+        description: 'Publish even if CI has not passed for this commit (emergency use only)'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: purple-dots-build-images-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # Lowercase by hand: image references must be lowercase, while
+  # github.repository keeps the org's capitalisation.
+  IMAGE: ghcr.io/blue-dots-economy/purple-dots
+
+jobs:
+  # Gate: refuse to publish an image built from a commit CI has not passed
+  # (Blue-Dots-Economy/signals-dpg#765). `needs:` cannot reach across workflows,
+  # so this asks the API whether a successful purple-dots-ci.yaml run exists for
+  # the commit. That workflow's only advisory job (format) cannot fail the run,
+  # so "succeeded" means: compile, lint, tests and the image smoke test passed.
+  verify-ci:
+    name: Verify CI passed for this commit
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read # read workflow runs for this SHA
+    steps:
+      - name: Require a successful purple-dots-ci.yaml run for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          SKIP: ${{ inputs.skip_ci_check }}
+        run: |
+          set -euo pipefail
+
+          # `inputs` is empty on a tag push, so this is false unless someone
+          # dispatched with the box ticked.
+          if [ "${SKIP:-false}" = "true" ]; then
+            echo "::warning title=CI gate bypassed::Publishing ${SHA} without checking CI, because skip_ci_check was set on this dispatch."
+            exit 0
+          fi
+
+          runs=$(gh api --paginate \
+            "repos/${REPO}/actions/workflows/purple-dots-ci.yaml/runs?head_sha=${SHA}" \
+            --jq '.workflow_runs[] | "\(.status)/\(.conclusion // "pending")\t\(.event)\t\(.html_url)"')
+
+          # FAIL CLOSED on no runs at all. The realistic accident is a tag cut from
+          # a commit CI never saw, not one it saw and rejected; a "did it fail?"
+          # test would wave that through.
+          if [ -z "${runs}" ]; then
+            echo "::error title=No CI run for this commit::purple-dots-ci.yaml has never run for ${SHA}, so there is nothing to verify. Cut the release tag from a commit on main that CI has already tested."
+            exit 1
+          fi
+
+          echo "purple-dots-ci.yaml runs found for ${SHA}:"
+          while IFS= read -r line; do echo "  ${line}"; done <<< "${runs}"
+
+          if echo "${runs}" | grep -q '^completed/success'; then
+            echo "CI passed for ${SHA} - proceeding to build."
+            exit 0
+          fi
+
+          echo "::error title=CI did not pass::No successful purple-dots-ci.yaml run exists for ${SHA}. Fix CI on that commit and re-tag, or re-run this workflow manually with skip_ci_check if this is a deliberate emergency publish."
+          exit 1
+
+  build:
+    name: Build and push
+    needs: verify-ci
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write # push the image to GHCR
+      security-events: write # upload the Trivy image scan to Security > Code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      # No dhi.io login: the base image is python:3.13-slim from Docker Hub.
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        id: meta
+        with:
+          images: ${{ env.IMAGE }}
+          # `type=ref,event=tag` emits the tag verbatim (purple-dots-v1.2.0).
+          # `type=match` strips the prefix to a plain version (1.2.0); type=semver
+          # cannot, because it does not parse the prefixed tag at all.
+          # `type=ref,event=branch` only fires on a manual run from a branch.
+          # Comments stay OUT of the block scalar below: it is passed to the action
+          # verbatim, not parsed as YAML.
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=match,pattern=purple-dots-v(\d+\.\d+\.\d+),group=1
+            type=sha,format=short
+
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        id: build
+        with:
+          context: purple_dots
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=purple-dots
+          cache-to: type=gha,mode=max,scope=purple-dots
+
+      # Scanned by digest, not by tag: buildx pushes straight to the registry
+      # without loading into the local image store, and the digest ties the
+      # result to the exact artefact built here. Report-only, as in the other
+      # service repos.
+      - name: Trivy image scan
+        if: steps.build.outputs.digest != ''
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+          format: sarif
+          output: trivy-image.sarif
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0" # report-only, never fails the release build
+
+      # always(), so a scan that exits non-zero still publishes what it found; but
+      # only when a scan ran, or the missing-file error buries the real failure.
+      - name: Upload Trivy image SARIF
+        if: always() && steps.build.outputs.digest != ''
+        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image-purple-dots

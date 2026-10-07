@@ -1,0 +1,220 @@
+name: Purple Dots CI
+# CI for purple_dots/ only. blue_dots/ shares this repo but is not covered here:
+# it has no tests, no image and a different set of credentials, and gating it is
+# a separate decision.
+#
+# What gates and what does not, measured on the untouched code:
+#   * check        BLOCKING - py_compile, ruff (bug rules only) and the unit
+#                             tests. All clean today.
+#   * smoke-image  BLOCKING - builds purple_dots/Dockerfile WITHOUT pushing and
+#                             runs it with no credentials. Skips itself when
+#                             nothing that goes into the image changed.
+#   * format       ADVISORY - `ruff format --check`. 3 of 6 files would be
+#                             reformatted today, so a blocking gate would be red
+#                             on day one.
+#
+# Runs on every PR and push, including blue_dots/-only ones, so that every commit
+# has a run for purple-dots-build-images.yaml's verify-ci to find. The jobs take
+# well under a minute, and smoke-image skips when purple_dots/ is untouched.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # Cancel superseded PR runs, but never a push to main: a cancelled push run
+  # leaves that commit with no result, and verify-ci then refuses to publish it.
+  # GitHub keeps only ONE pending run per group, so pushes get a group per commit.
+  group: purple-dots-ci-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    working-directory: purple_dots
+
+jobs:
+  check:
+    name: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # 3.13 matches the image (purple_dots/Dockerfile).
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: purple_dots/requirements-dev.txt
+
+      - run: pip install -r requirements-dev.txt
+
+      # Compile, never import. An earlier one-off script in this repo had no
+      # main() guard and ran a production migration on import, so "does it
+      # parse" is answered by py_compile and nothing else.
+      - name: py_compile
+        run: python -m py_compile load_purple.py raya_client.py transform_purple.py
+
+      # The rule set is given here rather than left to ruff's defaults, which
+      # changed under us: ruff 0.14 passes this code clean, 0.16 reports 22
+      # findings (mostly BLE001 on deliberate `except Exception` fallbacks). E4,
+      # E7, E9 and F are syntax errors, undefined names and unused imports or
+      # variables: real bugs, all clean today. --isolated ignores any config
+      # file, so the gate means the same thing wherever it runs.
+      - name: ruff (bug rules)
+        run: ruff check --isolated --select E4,E7,E9,F --target-version py313 .
+
+      # Synthetic fixtures only, no network, no credentials. The tests include
+      # the "no personal data in a row" guarantee the table is built on.
+      - name: pytest
+        run: python -m pytest -q tests
+
+  smoke-image:
+    name: smoke-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history, so the diff below can reach the PR base or the previous
+          # push.
+          fetch-depth: 0
+
+      # Done inside the job, not with workflow-level `paths:`, so the job still
+      # reports green and every commit keeps a run for verify-ci. Fails OPEN:
+      # any doubt about the diff base (first push, force push, manual run)
+      # builds the image.
+      - name: Did anything that goes into the image change?
+        id: changes
+        working-directory: .
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base=""
+          case "${EVENT}" in
+            pull_request) base="${PR_BASE}" ;;
+            push) base="${PUSH_BEFORE}" ;;
+          esac
+          if [ -z "${base}" ] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+            echo "No usable diff base (${EVENT}); building the image."
+            echo "image=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The image is built from purple_dots/ only, and this workflow decides
+          # how it is tested. Docs inside purple_dots/ are copied in (README.md)
+          # but cannot break it, so they are not counted.
+          relevant=$(git diff --name-only "${base}" HEAD \
+            | grep -E '^(purple_dots/|\.github/workflows/purple-dots-ci\.yaml$)' \
+            | grep -Ev '\.md$' || true)
+          if [ -n "${relevant}" ]; then
+            echo "Image inputs changed:"; while IFS= read -r f; do echo "  ${f}"; done <<< "${relevant}"
+            echo "image=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice title=smoke-image skipped::Nothing under purple_dots/ changed since ${base}."
+            echo "image=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # docker-container driver: required for the gha layer cache below.
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        if: steps.changes.outputs.image == 'true'
+
+      # The base image is python:3.13-slim from Docker Hub, which allows anonymous
+      # pulls, so unlike the dhi.io-based repos this needs no registry secret and
+      # runs on fork and Dependabot PRs too.
+      - name: Build the image (no push)
+        if: steps.changes.outputs.image == 'true'
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: purple_dots
+          load: true # into the local image store, so it can be run below
+          push: false
+          tags: purple-dots:ci
+          cache-from: type=gha,scope=purple-dots
+          cache-to: type=gha,mode=max,scope=purple-dots
+
+      # The loader is a batch job, not a server, so there is nothing to probe.
+      # What can go wrong in the image is checked instead: it starts, it parses
+      # its arguments, it refuses to run without credentials (rather than half-
+      # running), and it is not root. Nothing here reaches Raya or Supabase.
+      - name: Run the image without credentials
+        if: steps.changes.outputs.image == 'true'
+        working-directory: .
+        run: |
+          set -euo pipefail
+
+          docker run --rm purple-dots:ci --help > help.txt
+          grep -q -- '--batch' help.txt || { echo "::error::--help did not list --batch"; cat help.txt; exit 1; }
+
+          # The default CMD is --dry-run. With no credentials it must stop at the
+          # credential check with a non-zero exit, not try to call anything.
+          set +e
+          docker run --rm purple-dots:ci > out.txt 2>&1
+          code=$?
+          set -e
+          cat out.txt
+          [ "${code}" != "0" ] || { echo "::error::the loader exited 0 with no credentials"; exit 1; }
+          grep -q 'missing: RAYA_API_KEY' out.txt \
+            || { echo "::error::expected the missing-credentials message"; exit 1; }
+
+          uid=$(docker run --rm --entrypoint python purple-dots:ci -c 'import os; print(os.getuid())')
+          echo "container uid: ${uid}"
+          [ "${uid}" != "0" ] || { echo "::error::the container runs as root"; exit 1; }
+
+          # The .dockerignore allow-list is what keeps .env and data/ (the Basti
+          # sheet held personal data) out of the image. Check the result, not
+          # the rule.
+          leaked=$(docker run --rm --entrypoint sh purple-dots:ci -c \
+            'ls -A /app | grep -Ev "^(load_purple\.py|raya_client\.py|transform_purple\.py|requirements\.txt|README\.md|sql|data)$" || true')
+          [ -z "${leaked}" ] || { echo "::error::unexpected files in /app: ${leaked}"; exit 1; }
+          data=$(docker run --rm --entrypoint sh purple-dots:ci -c 'ls -A /app/data')
+          [ -z "${data}" ] || { echo "::error::/app/data is not empty in the image: ${data}"; exit 1; }
+
+  format:
+    name: format (advisory)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: purple_dots/requirements-dev.txt
+
+      - run: pip install -r requirements-dev.txt
+
+      - name: ruff format --check
+        id: format
+        continue-on-error: true
+        run: ruff format --check --isolated --line-length 100 .
+
+      # A step that fails under continue-on-error leaves the job green, which is
+      # how an advisory check quietly becomes one nobody reads. Say it out loud.
+      - name: Report
+        if: always()
+        env:
+          FORMAT: ${{ steps.format.outcome }}
+        run: |
+          {
+            echo "### Format (advisory - does not fail the build)"
+            echo
+            echo "| Check | Result |"
+            echo "| --- | --- |"
+            echo "| ruff format | ${FORMAT} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "${FORMAT}" = "failure" ]; then
+            echo "::warning title=ruff format would reformat files::Advisory only. Baseline is 3 of 6 files (the three pre-existing modules). Run 'ruff format --line-length 100 purple_dots' in its own PR."
+          fi
