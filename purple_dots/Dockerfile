@@ -1,4 +1,4 @@
-# Purple Dots loader: Raya calls -> Supabase.
+# Purple Dots loader: Raya calls -> Postgres.
 #
 #   docker build -t purple-dots .
 #   docker run --rm --env-file .env purple-dots --check
@@ -8,7 +8,7 @@
 # Or everything - calls in and out, plus the platform dump - in one go:
 #   docker run --rm --env-file .env --entrypoint python purple-dots \n#       run_pipeline.py
 #
-# A batch job, not a service. It runs, writes to Supabase, and exits.
+# A batch job, not a service. It runs, writes to Postgres, and exits.
 #
 # It writes NO files by default. --csv asks for the rows on disk, and only
 # then is a mount worth having:
@@ -19,7 +19,7 @@
 # The three credentials come from the environment at run time. load_purple.py
 # calls a bare load_dotenv(), which finds no .env inside the container and
 # falls through to the real environment, so --env-file and -e both work:
-#   SUPABASE_URL  SUPABASE_SECRET_KEY  RAYA_API_KEY
+#   DATABASE_URL  RAYA_API_KEY
 # .dockerignore keeps .env and data/ out of the build context entirely - a
 # secret copied in and deleted later still lives in the layer that added it.
 
@@ -45,8 +45,8 @@ COPY sql/ ./sql/
 
 # Only --csv writes here, and nothing does by default. The directory exists
 # so that flag works without a mount; unmounted, whatever it writes dies with
-# the container - which is the right default for call data that already has a
-# home in Supabase.
+# the container - which is the right default for call data whose home is
+# the database.
 RUN mkdir -p /app/data
 
 # Not root. The loader needs no privileges - it makes HTTPS requests and

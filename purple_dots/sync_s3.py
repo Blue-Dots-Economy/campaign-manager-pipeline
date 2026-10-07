@@ -16,7 +16,6 @@ Two steps, neither using AWS credentials:
 Rows carry no names: the exporter masks age as '2***' and gender as 'D***'.
 """
 import argparse
-import io
 import zlib
 import json
 import os

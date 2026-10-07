@@ -49,13 +49,23 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
                     help="rehearse every stage; nothing is written")
+    ap.add_argument("--refresh-days", type=int,
+                    default=int(os.getenv("PD_REFRESH_DAYS", "3")),
+                    metavar="N",
+                    help="re-fetch stored calls from the last N days, so a "
+                         "call captured mid-call is corrected. 0 disables. "
+                         "Default 3, or PD_REFRESH_DAYS.")
     ap.add_argument("--skip", action="append", default=[],
                     metavar="STAGE",
                     choices=["check", "outbound", "inbound", "platform"],
                     help="leave a stage out; repeatable")
     args = ap.parse_args()
 
-    print(f"Purple Dots pipeline  {'(dry run)' if args.dry_run else ''}")
+    refresh = (["--refresh-days", str(args.refresh_days)]
+               if args.refresh_days else [])
+    print(f"Purple Dots pipeline  {'(dry run)' if args.dry_run else ''}"
+          + (f"  refreshing the last {args.refresh_days} days"
+             if refresh else ""))
 
     results = []
 
@@ -70,13 +80,14 @@ def main():
             return 1
 
     if "outbound" not in args.skip:
-        results.append(("outbound", *run("2/4  outbound - calls the bots made",
-                                         ["load_purple.py"], args.dry_run)))
+        results.append(("outbound", *run(
+            "2/4  outbound - calls the bots made",
+            ["load_purple.py"] + refresh, args.dry_run)))
 
     if "inbound" not in args.skip:
-        results.append(("inbound", *run("3/4  inbound - calls people made in",
-                                        ["load_purple.py", "--inbound"],
-                                        args.dry_run)))
+        results.append(("inbound", *run(
+            "3/4  inbound - calls people made in",
+            ["load_purple.py", "--inbound"] + refresh, args.dry_run)))
 
     # Optional: its credentials are separate from Raya's and the database's.
     if "platform" not in args.skip:

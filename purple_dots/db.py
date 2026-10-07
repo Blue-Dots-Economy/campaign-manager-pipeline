@@ -8,8 +8,9 @@ from contextlib import contextmanager
 try:
     import psycopg2
     import psycopg2.extras
+    import psycopg2.sql as pgsql
 except ImportError:
-    psycopg2 = None
+    psycopg2 = pgsql = None
 
 
 def describe():
@@ -26,17 +27,29 @@ def require_url():
     if not url:
         raise SystemExit(
             "DATABASE_URL is not set.\n"
-            '  $env:DATABASE_URL = "postgresql://purple:purple@localhost:5433/purple"\n'
+            '  $env:DATABASE_URL = "postgresql://purple:<password>@localhost:5433/purple"\n'
             "  (or put it in .env - see .env.example)")
     return url
 
 
-@contextmanager
-def _conn():
+# Bounded so a wedged connection cannot hang a scheduled run indefinitely.
+CONNECT_TIMEOUT = int(os.getenv("PD_CONNECT_TIMEOUT", "10"))
+STATEMENT_TIMEOUT_MS = int(os.getenv("PD_STATEMENT_TIMEOUT_MS", "300000"))
+
+
+def connect():
     if psycopg2 is None:
         raise SystemExit("psycopg2 is not installed.\n"
                          "  pip install psycopg2-binary")
-    conn = psycopg2.connect(require_url())
+    return psycopg2.connect(
+        require_url(),
+        connect_timeout=CONNECT_TIMEOUT,
+        options=f"-c statement_timeout={STATEMENT_TIMEOUT_MS}")
+
+
+@contextmanager
+def _conn():
+    conn = connect()
     try:
         yield conn
         conn.commit()
@@ -47,21 +60,45 @@ def _conn():
         conn.close()
 
 
+_JSON_COLUMNS = {}
+
+
+def json_columns(cur, table):
+    """Which columns are json/jsonb. Cached per table.
+
+    Needed because a Python list means two different things here:
+    purple_dots_calls has text[] columns (tools_used,
+    disability_category_mapped, ...) which psycopg2 adapts natively, while
+    the platform tables have jsonb which needs Json(). Wrapping everything
+    gave 'malformed array literal: "[\"Low Vision\"]"' on every call that
+    used a tool - which is nearly all of them.
+    """
+    if table not in _JSON_COLUMNS:
+        cur.execute(
+            "select column_name from information_schema.columns "
+            "where table_schema = 'public' and table_name = %s "
+            "  and data_type in ('json', 'jsonb')", (table,))
+        _JSON_COLUMNS[table] = {r[0] for r in cur.fetchall()}
+    return _JSON_COLUMNS[table]
+
+
 def table_count(table):
     """Rows in the table, or None if it does not exist."""
     with _conn() as conn, conn.cursor() as cur:
         cur.execute("select to_regclass(%s)", (f"public.{table}",))
         if cur.fetchone()[0] is None:
             return None
-        cur.execute(f'select count(*) from public."{table}"')
+        cur.execute(pgsql.SQL("select count(*) from public.{}").format(
+            pgsql.Identifier(table)))
         return cur.fetchone()[0]
 
 
 def column_values(table, column):
     """Every non-null value of one column. Used for 'what is already loaded'."""
     with _conn() as conn, conn.cursor() as cur:
-        cur.execute(f'select "{column}" from public."{table}" '
-                    f'where "{column}" is not null')
+        cur.execute(pgsql.SQL(
+            "select {col} from public.{tbl} where {col} is not null").format(
+                col=pgsql.Identifier(column), tbl=pgsql.Identifier(table)))
         return [row[0] for row in cur.fetchall()]
 
 
@@ -72,9 +109,7 @@ def can_write(table):
     column privilege, so it passes for a user who cannot insert.
     """
     try:
-        if psycopg2 is None:
-            return False, "psycopg2 is not installed"
-        conn = psycopg2.connect(require_url())
+        conn = connect()
         try:
             with conn.cursor() as cur:
                 # every NOT NULL column without a default
@@ -84,10 +119,11 @@ def can_write(table):
                     "  and is_nullable = 'NO' and column_default is null",
                     (table,))
                 cols = [r[0] for r in cur.fetchall()] or ["call_id"]
-                names = ", ".join(f'"{c}"' for c in cols)
-                marks = ", ".join(["%s"] * len(cols))
                 cur.execute(
-                    f'insert into public."{table}" ({names}) values ({marks})',
+                    pgsql.SQL("insert into public.{} ({}) values ({})").format(
+                        pgsql.Identifier(table),
+                        pgsql.SQL(", ").join(map(pgsql.Identifier, cols)),
+                        pgsql.SQL(", ").join(pgsql.Placeholder() * len(cols))),
                     tuple("__preflight_probe__" for _ in cols))
             conn.rollback()
             return True, ""
@@ -97,16 +133,20 @@ def can_write(table):
         return False, str(exc).strip().splitlines()[0][:80]
 
 
-def upsert(table, rows, conflict, chunk=200):
+def upsert(table, rows, conflict, chunk=200, preserve=()):
     """Insert rows, updating on conflict. Returns how many were sent.
 
-    `conflict` is a comma-separated key list.
+    `conflict` is a comma-separated key list. `preserve` names columns that
+    keep their stored value on conflict - set on insert, never overwritten.
+    test_flag and call_value_score are decided outside this pipeline, so a
+    re-fetch must not reset them to the NULL make_row produces.
     """
     if not rows:
         return 0
     cols = conflict.split(",")
     done = 0
     with _conn() as conn, conn.cursor() as cur:
+        jsonb = json_columns(cur, table)
         for start in range(0, len(rows), chunk):
             batch = rows[start:start + chunk]
             # Every row in one statement must carry the same columns, and a
@@ -119,20 +159,25 @@ def upsert(table, rows, conflict, chunk=200):
                 if ident in seen:
                     continue
                 seen.add(ident)
-                # dict and list need wrapping for jsonb; psycopg2 raises
-                # "can't adapt type 'dict'" otherwise.
                 squared.append(tuple(
                     psycopg2.extras.Json(r[k])
-                    if isinstance(r.get(k), (dict, list)) else r.get(k)
+                    if k in jsonb and isinstance(r.get(k), (dict, list))
+                    else r.get(k)
                     for k in keys))
-            quoted = ", ".join(f'"{k}"' for k in keys)
-            updates = ", ".join(f'"{k}" = excluded."{k}"'
-                                for k in keys if k not in cols)
-            target = ", ".join(f'"{c}"' for c in cols)
-            sql = (f'insert into public."{table}" ({quoted}) values %s '
-                   f'on conflict ({target}) '
-                   + (f'do update set {updates}' if updates else 'do nothing'))
-            psycopg2.extras.execute_values(cur, sql, squared, page_size=chunk)
+            updates = [pgsql.SQL("{0} = excluded.{0}").format(
+                pgsql.Identifier(k))
+                for k in keys if k not in cols and k not in preserve]
+            statement = pgsql.SQL(
+                "insert into public.{tbl} ({cols}) values %s "
+                "on conflict ({keys}) {action}").format(
+                    tbl=pgsql.Identifier(table),
+                    cols=pgsql.SQL(", ").join(map(pgsql.Identifier, keys)),
+                    keys=pgsql.SQL(", ").join(map(pgsql.Identifier, cols)),
+                    action=(pgsql.SQL("do update set ")
+                            + pgsql.SQL(", ").join(updates)
+                            if updates else pgsql.SQL("do nothing")))
+            psycopg2.extras.execute_values(
+                cur, statement.as_string(cur), squared, page_size=chunk)
             done += len(squared)
     return done
 
@@ -145,7 +190,9 @@ def disable_rls(table):
         row = cur.fetchone()
         if not row or not row[0]:
             return False
-        cur.execute(f'alter table public."{table}" disable row level security')
+        cur.execute(pgsql.SQL(
+            "alter table public.{} disable row level security").format(
+                pgsql.Identifier(table)))
         return True
 
 
@@ -156,12 +203,10 @@ def ensure_supabase_roles():
     """
     with _conn() as conn, conn.cursor() as cur:
         for role in ("anon", "authenticated", "service_role"):
-            cur.execute(
-                "do $$ begin "
-                f"  if not exists (select 1 from pg_roles where rolname = '{role}') then "
-                f"    create role {role} nologin; "
-                "  end if; "
-                "end $$;")
+            cur.execute("select 1 from pg_roles where rolname = %s", (role,))
+            if not cur.fetchone():
+                cur.execute(pgsql.SQL("create role {} nologin").format(
+                    pgsql.Identifier(role)))
 
 
 def run_sql_file(path):

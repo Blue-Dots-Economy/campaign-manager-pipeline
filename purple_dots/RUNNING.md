@@ -8,7 +8,19 @@ Raya calls -> Postgres. A batch job: it runs, writes, exits.
 
 ## Setup, once
 
-**1. Start the database.**
+**1. Create `.env`:**
+
+```
+POSTGRES_PASSWORD=<choose anything>
+DATABASE_URL=postgresql://purple:<the same one>@localhost:5433/purple
+RAYA_API_KEY=<ALIMCO / Purple Dots Raya key>
+```
+
+The password is yours to pick - the database is local and not exposed. Both
+lines must carry the same one; `docker compose` reads the first and the
+pipeline reads the second.
+
+**2. Start the database.**
 
 ```
 cd purple_dots
@@ -19,13 +31,6 @@ Postgres on port **5433**, not 5432, so it cannot collide with another one
 already running - that collision is silent, and writes land in the wrong
 place. The data lives in a named volume, so `docker compose down` keeps it.
 `down -v` does not.
-
-**2. Create `.env`:**
-
-```
-DATABASE_URL=postgresql://purple:purple@localhost:5433/purple
-RAYA_API_KEY=<ALIMCO / Purple Dots Raya key>
-```
 
 **3. Create the tables, once:**
 

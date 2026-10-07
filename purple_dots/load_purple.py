@@ -65,7 +65,7 @@ def _env_map(name, default):
     return out
 
 
-AGENTS = {
+AGENTS = _env_map("PD_AGENTS", {
     # The live bots.
     #
     # THREE BATCHES ARE REAL, as of 5 Oct 2026:
@@ -84,12 +84,11 @@ AGENTS = {
     "db21effb-91a9-4af6-b3d2-8efed46c0415": "Purple-dots-with-APIs-V2-Latest",
     "7ecc138a-8f9d-40e8-b35c-e7b6971dbd01": "Purple-Dots-Outbound-290720261133",
     "1e8faf6a-db15-4796-81f1-55b9e9aab358": "Testing Agent- Purple Dots",
-}
+})
 
 # test bots: real calls in Raya, meaningless here
-EXCLUDED = {
-    "1e8faf6a-db15-4796-81f1-55b9e9aab358",   # Testing Agent- Purple Dots
-}
+EXCLUDED = _env_set("PD_EXCLUDED_AGENTS",
+                    "1e8faf6a-db15-4796-81f1-55b9e9aab358")
 
 # Bots that answer calls. 'Testing Agent- Purple Dots' (1e8faf6a) also has
 # 225 inbound calls but no output_instructions and no tools, so they carry a
@@ -99,9 +98,11 @@ INBOUND_AGENTS = _env_map("PD_INBOUND_AGENTS", {
     "a1567240-052e-4ec0-be49-be2ca2d58ea6": "Purple-Dots-Inbound-061020261110",
 })
 
-# Team test numbers. Their inbound calls get test_flag = true rather than
-# being dropped, so the row count still reconciles with Raya.
-TEST_PHONES: set[str] = _env_set("PD_TEST_PHONES", "8065295804")
+# Team test numbers, from PD_TEST_PHONES. Their inbound calls get
+# test_flag = true rather than being dropped, so the row count still
+# reconciles with Raya. Empty by default: whose numbers these are differs
+# per deployment, and a real number does not belong in the source.
+TEST_PHONES: set[str] = _env_set("PD_TEST_PHONES")
 
 
 def is_test_caller(call):
@@ -311,6 +312,12 @@ def existing_ids():
     return {str(v) for v in db.column_values(TABLE, "call_id")}
 
 
+# Decided outside this pipeline - test_flag by the loader's own rules, and
+# call_value_score by whoever builds the output sheet. make_row returns NULL
+# for both, so a re-fetch must not write that over a stored value.
+PRESERVE_ON_CONFLICT = ("test_flag", "call_value_score")
+
+
 def push(rows, size=200, table=TABLE, on_conflict="call_id"):
     """Upsert. db.upsert collapses duplicate keys and squares the rows off.
 
@@ -319,7 +326,8 @@ def push(rows, size=200, table=TABLE, on_conflict="call_id"):
     "ON CONFLICT DO UPDATE command cannot affect row a second time"), and
     every row in one statement must carry the same columns.
     """
-    done = db.upsert(table, rows, on_conflict, chunk=size)
+    done = db.upsert(table, rows, on_conflict, chunk=size,
+                     preserve=PRESERVE_ON_CONFLICT)
     if done != len(rows):
         print(f"    {len(rows) - done} duplicate keys collapsed")
     print(f"    {done}/{len(rows)}")

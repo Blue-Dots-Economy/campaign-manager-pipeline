@@ -1,8 +1,10 @@
 # Local Postgres for the Purple Dots pipeline.
 #
-#   docker compose up -d
-#   $env:DATABASE_URL = "postgresql://purple:purple@localhost:5433/purple"
+#   docker compose up -d        reads POSTGRES_PASSWORD from .env
 #   python init_db.py
+#
+# The password is not in this file: compose reads it from .env, the same
+# file DATABASE_URL lives in, so the two cannot disagree.
 #
 # Port 5433, not 5432: a machine that already runs Postgres - or Supabase's
 # own local stack - holds 5432, and the collision is silent until a write
@@ -20,15 +22,15 @@ services:
   db:
     image: postgres:17-alpine
     environment:
-      POSTGRES_USER: purple
-      POSTGRES_PASSWORD: purple
-      POSTGRES_DB: purple
+      POSTGRES_USER: ${POSTGRES_USER:-purple}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-purple}
     ports:
       - "5433:5432"
     volumes:
       - purple_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U purple -d purple"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-purple} -d $${POSTGRES_DB:-purple}"]
       interval: 3s
       timeout: 3s
       retries: 10

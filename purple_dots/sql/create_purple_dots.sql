@@ -160,3 +160,7 @@ create index if not exists purple_dots_connections_seeker_idx
 
 -- No RLS here either; see the note on purple_dots_calls above.
 grant select, insert, update on public.purple_dots_connections to service_role;
+-- The sequence too: id is bigserial, and a table grant alone gives
+-- "permission denied for sequence purple_dots_connections_id_seq" on insert.
+grant usage, select on sequence public.purple_dots_connections_id_seq
+    to service_role;
