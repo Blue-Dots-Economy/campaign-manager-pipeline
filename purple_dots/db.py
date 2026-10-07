@@ -119,7 +119,12 @@ def upsert(table, rows, conflict, chunk=200):
                 if ident in seen:
                     continue
                 seen.add(ident)
-                squared.append(tuple(r.get(k) for k in keys))
+                # dict and list need wrapping for jsonb; psycopg2 raises
+                # "can't adapt type 'dict'" otherwise.
+                squared.append(tuple(
+                    psycopg2.extras.Json(r[k])
+                    if isinstance(r.get(k), (dict, list)) else r.get(k)
+                    for k in keys))
             quoted = ", ".join(f'"{k}"' for k in keys)
             updates = ", ".join(f'"{k}" = excluded."{k}"'
                                 for k in keys if k not in cols)

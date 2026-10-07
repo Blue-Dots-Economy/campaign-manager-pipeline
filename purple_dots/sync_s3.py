@@ -16,8 +16,8 @@ Two steps, neither using AWS credentials:
 Rows carry no names: the exporter masks age as '2***' and gender as 'D***'.
 """
 import argparse
-import gzip
 import io
+import zlib
 import json
 import os
 from datetime import datetime, timedelta
@@ -112,32 +112,51 @@ def stream_records(url):
         if resp.status_code != 200:
             raise DumpError(f"download failed: {resp.status_code} "
                             f"{resp.text[:200]}")
-        resp.raw.decode_content = True
-        buffered = io.BufferedReader(resp.raw)
-        if buffered.peek(2)[:2] == GZIP_MAGIC:
-            buffered = gzip.GzipFile(fileobj=buffered)
-        for n, line in enumerate(io.TextIOWrapper(buffered, encoding="utf-8"),
-                                 start=1):
-            line = line.strip()
-            if not line:
+        # Decompress from iter_content rather than wrapping resp.raw:
+        # urllib3 releases the connection at the end of the body, and
+        # GzipFile reading its trailer from the closed socket raises
+        # "read of closed file" on the last chunk.
+        unzip, tail, n = None, b"", 0
+        for chunk in resp.iter_content(64 * 1024):
+            if not chunk:
                 continue
+            if unzip is None:
+                unzip = (zlib.decompressobj(31)
+                         if chunk[:2] == GZIP_MAGIC else False)
+            if unzip is not False:
+                chunk = unzip.decompress(chunk)
+            tail += chunk
+            while b"\n" in tail:
+                line, _, tail = tail.partition(b"\n")
+                n += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError as exc:
+                    print(f"    WARNING: line {n}: {exc}")
+        if unzip not in (None, False):
+            tail += unzip.flush()
+        if tail.strip():
             try:
-                yield json.loads(line)
+                yield json.loads(tail)
             except json.JSONDecodeError as exc:
-                print(f"    WARNING: line {n}: {exc}")
+                print(f"    WARNING: last line: {exc}")
 
 
 def user_row(r, instance):
+    # The key is "id", not "user_id" - the Blue Dots dump's spelling, which
+    # this was written against before a Purple Dots record existed. There is
+    # also no user_state, user_network or lifecycle_status here.
     return {
-        "instance": instance, "user_id": r["user_id"],
-        "user_network": r.get("user_network"),
-        "lifecycle_status": r.get("lifecycle_status"),
+        "instance": instance, "user_id": r["id"],
         "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
+        "domains": r.get("domains") or [],
         "onboarded_by_org_id": r.get("onboarded_by_org_id"),
         "onboarded_via": r.get("onboarded_via"),
+        "onboarded_source_id": r.get("onboarded_source_id"),
         "onboarded_at": r.get("onboarded_at"),
-        # Masked at source: '2***' for age, 'D***' for gender.
-        "user_state": r.get("user_state") or {},
         "tags": r.get("tags") or {},
     }
 
@@ -159,6 +178,16 @@ def item_row(r, instance):
 
 
 def action_row(r, instance):
+    """None when the record has no action_id.
+
+    As of 7 Oct 2026 every item_actions record in the purple_dot_dev dump
+    carries only partition_network, created_at and updated_at - no id, no
+    type, no item, no actor. 124 rows of nothing joinable. They are counted
+    and skipped rather than given a synthetic key, which would make an
+    exporter problem look like data.
+    """
+    if not r.get("action_id"):
+        return None
     return {
         "instance": instance, "action_id": r["action_id"],
         "partition_network": r.get("partition_network"),
@@ -222,8 +251,12 @@ def main():
 
     for stem, table, conflict, build, id_field in SPECS:
         total, batch = 0, []
+        skipped = 0
         for record in stream_records(by_table[stem]):
             row = build(record, args.instance)
+            if row is None:
+                skipped += 1
+                continue
             if id_field in ids:
                 ids[id_field].add(row[id_field])
             elif row.get("item_id") and row["item_id"] not in ids["item_id"]:
@@ -238,7 +271,8 @@ def main():
         if batch and writing:
             push(table, conflict, batch)
         print(f"  {table:<16}{total:>8} rows"
-              f"{'' if writing else '  (not written)'}")
+              f"{'' if writing else '  (not written)'}"
+              f"{f'   {skipped} skipped: no id' if skipped else ''}")
 
     if dangling:
         print(f"\n  {dangling} actions reference an item not in this snapshot. "

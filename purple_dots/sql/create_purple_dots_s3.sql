@@ -16,19 +16,19 @@
 -- them - and a column per key means a migration every time the platform
 -- adds a field.
 
+-- Matches the dump as it actually arrives. There is no user_state here -
+-- the Blue Dots dump has one, Purple Dots does not - so no age or gender
+-- field exists to mask.
 create table if not exists public.purple_users (
     instance             text        not null,
-    user_id              text        not null,
-    user_network         text,
-    lifecycle_status     text,
+    user_id              text        not null,   -- "id" in the dump
     created_at           timestamptz,
     updated_at           timestamptz,
+    domains              jsonb       not null default '[]'::jsonb,
     onboarded_by_org_id  text,
     onboarded_via        text,
+    onboarded_source_id  text,
     onboarded_at         timestamptz,
-    -- Masked at source: age arrives as '2***', gender as 'D***'. Nothing
-    -- downstream can recover them; the exporter removed them before writing.
-    user_state           jsonb       not null default '{}'::jsonb,
     tags                 jsonb       not null default '{}'::jsonb,
     loaded_at            timestamptz not null default now(),
     primary key (instance, user_id)
