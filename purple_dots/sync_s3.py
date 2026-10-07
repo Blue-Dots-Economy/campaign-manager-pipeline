@@ -182,26 +182,32 @@ def item_row(r, instance):
     }
 
 
+# The export's item_actions allowlist (signals-s3-export manifests). Copied
+# field for field: a name that is not in the dump just loads as null.
+ACTION_FIELDS = (
+    "partition_network", "action_type", "action_status", "update_count",
+    "source_item_network", "source_item_domain", "source_item_type",
+    "source_item_id", "source_item_owner",
+    "target_item_network", "target_item_domain", "target_item_type",
+    "target_item_id", "target_item_owner",
+    "performed_by_org_id", "created_at", "updated_at",
+)
+
+
 def action_row(r, instance):
     """None when the record has no action_id.
 
-    As of 7 Oct 2026 every item_actions record in the purple_dot_dev dump
-    carries only partition_network, created_at and updated_at - no id, no
-    type, no item, no actor. 124 rows of nothing joinable. They are counted
-    and skipped rather than given a synthetic key, which would make an
-    exporter problem look like data.
+    The purple_dot export allowlist carried only partition_network,
+    created_at and updated_at until its item_actions columns were added, so
+    every action arrived with no id. Those are counted and skipped rather
+    than given a synthetic key, which would make an exporter problem look
+    like data.
     """
     if not r.get("action_id"):
         return None
-    return {
-        "instance": instance, "action_id": r["action_id"],
-        "partition_network": r.get("partition_network"),
-        "action_type": r.get("action_type"),
-        "action_status": r.get("action_status"),
-        "actor_user_id": r.get("actor_user_id"), "item_id": r.get("item_id"),
-        "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
-        "action_state": r.get("action_state") or {},
-    }
+    row = {"instance": instance, "action_id": r["action_id"]}
+    row.update({f: r.get(f) for f in ACTION_FIELDS})
+    return row
 
 
 # Users and items first: their ids are needed to check item_actions.
@@ -266,7 +272,8 @@ def main():
                 continue
             if id_field in ids:
                 ids[id_field].add(row[id_field])
-            elif row.get("item_id") and row["item_id"] not in ids["item_id"]:
+            elif any(row.get(k) and row[k] not in ids["item_id"]
+                     for k in ("source_item_id", "target_item_id")):
                 # Torn snapshot: an action whose item never arrived.
                 dangling += 1
             batch.append(row)
