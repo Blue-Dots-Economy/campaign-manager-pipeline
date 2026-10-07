@@ -15,7 +15,7 @@ from requests.adapters import HTTPAdapter
 RAYA_BASE_URL = "https://v1.getraya.app"
 
 # Shared session with a big enough connection pool that concurrent transcript
-# fetches (see fetch_call_transcript) actually run concurrently instead of
+# fetches actually run concurrently instead of
 # queuing for a connection — the default adapter pool is only 10.
 _session = requests.Session()
 _adapter = HTTPAdapter(pool_connections=64, pool_maxsize=64)
@@ -201,15 +201,6 @@ def fetch_call_detail(api_key: str, call_uuid: str) -> dict[str, Any] | None:
         return None
     payload = resp.json()
     return payload if isinstance(payload, dict) else None
-
-
-def fetch_call_transcript(api_key: str, call_uuid: str) -> list[dict[str, Any]] | None:
-    """Just the transcript portion of the per-call record."""
-    detail = fetch_call_detail(api_key, call_uuid)
-    if not detail:
-        return None
-    transcript = detail.get("call_transcript")
-    return transcript if isinstance(transcript, list) else None
 
 
 def fetch_all_contacts(api_key: str, batch_id: int | str) -> list[dict[str, Any]]:

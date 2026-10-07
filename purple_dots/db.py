@@ -144,10 +144,3 @@ def upsert(table, rows, conflict, chunk=200):
         done += len(squared)
     return done
 
-
-def run_sql_file(path):
-    """Not possible here. Supabase exposes no API for DDL."""
-    raise SystemExit(
-        f"Supabase has no API for DDL, so {path} cannot be applied from here.\n"
-        f"Paste it into the SQL editor in the Supabase dashboard instead.\n"
-        f"(The postgres branch applies these files directly, via init_db.py.)")
