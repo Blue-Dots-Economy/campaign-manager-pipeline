@@ -1,0 +1,278 @@
+"""Stream the Purple Dots platform dump from S3 into Supabase. No files.
+
+    python sync_s3.py --check            # auth, snapshot metadata, nothing else
+    python sync_s3.py --dry-run          # stream and count, write nothing
+    python sync_s3.py                    # stream and upsert
+
+Run sql/create_purple_dots_s3.sql once first.
+
+NOTHING IS WRITTEN TO DISK
+The three .jsonl files are read straight off the pre-signed URL, a line at a
+time, and pushed to Supabase in chunks as they arrive. A full dump never
+exists locally, so there is nothing to forget to delete and nothing to leak
+from a laptop. Memory stays flat regardless of dump size - only the id sets
+used for reference checking are held, not the rows.
+
+WHAT THIS IS, AND WHAT IT IS NOT
+load_purple.py loads CALLS - what happened on the phone. This loads the
+PLATFORM: the people registered, the items created, and the actions taken on
+them. They meet only through profile_item_id.
+
+THE DUMP IS NON-PII BY DESIGN
+The exporter masks before it writes: age arrives as '2***', gender as
+'D***'. Nothing here recovers them - they never left the platform.
+
+TWO STEPS TO GET IN
+  1. POST {KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/token
+     grant_type=client_credentials  ->  a short-lived access_token
+  2. GET  {BASE_URL}/v1/campaign/dump  with that token
+     ->  three pre-signed S3 URLs, fetched WITHOUT an auth header
+
+The token must be a SYSTEM token. A coordinator or user token is rejected
+with 403 NOT_SYSTEM_CLIENT, and that is the usual first failure.
+
+CREDENTIALS ARE NOT SET YET. See .env.example.
+"""
+import argparse
+import gzip
+import io
+import json
+import os
+from datetime import datetime, timedelta
+from pathlib import Path
+
+import requests
+from dotenv import load_dotenv
+
+import db
+
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+DUMP_PATH = "/v1/campaign/dump"
+EXPECTED_TABLES = ["user", "items", "item_actions"]
+GZIP_MAGIC = b"\x1f\x8b"
+TORN_SNAPSHOT_TOLERANCE = timedelta(seconds=60)
+REQUEST_TIMEOUT = 30
+CHUNK = 500
+
+
+class DumpError(RuntimeError):
+    """A step failed; the message is written for whoever ran the script."""
+
+
+def need(name, default=None):
+    value = os.getenv(name, default)
+    if not value:
+        raise DumpError(f"{name} is not set. Copy .env.example to .env and "
+                        f"fill in BASE_URL, KEYCLOAK_URL and CLIENT_SECRET - "
+                        f"the Purple Dots deployment's, not the Blue Dots one.")
+    return value
+
+
+def get_token():
+    url = (f"{need('KEYCLOAK_URL').rstrip('/')}/realms/"
+           f"{os.getenv('REALM', 'campaign')}/protocol/openid-connect/token")
+    r = requests.post(url, timeout=REQUEST_TIMEOUT,
+                      data={"grant_type": "client_credentials",
+                            "client_id": os.getenv("CLIENT_ID", "campaign-manager"),
+                            "client_secret": need("CLIENT_SECRET")})
+    if r.status_code != 200:
+        raise DumpError(f"token request failed: {r.status_code} {r.text[:300]}")
+    token = r.json().get("access_token")
+    if not token:
+        raise DumpError(f"no access_token in the response: {r.text[:300]}")
+    return token
+
+
+def get_dump(token):
+    r = requests.get(need("BASE_URL").rstrip("/") + DUMP_PATH,
+                     timeout=REQUEST_TIMEOUT,
+                     headers={"Authorization": f"Bearer {token}"})
+    if r.status_code == 403:
+        raise DumpError("403 from the dump route. The token is a coordinator "
+                        "or user token; this route needs the system "
+                        "(client_credentials) one. Check CLIENT_ID and "
+                        "CLIENT_SECRET belong to a service account.")
+    if r.status_code == 503:
+        raise DumpError("503 DUMP_NOT_CONFIGURED - the deployment has no "
+                        "CAMPAIGN_DUMP_INSTANCE_ID set. Nothing to fix here.")
+    if r.status_code != 200:
+        raise DumpError(f"dump request failed: {r.status_code} {r.text[:300]}")
+    return r.json()
+
+
+def check_snapshot(files, allow_torn):
+    have = {f.get("table") for f in files}
+    missing = [t for t in EXPECTED_TABLES if t not in have]
+    if missing:
+        raise DumpError(f"snapshot is missing: {', '.join(missing)}. The API "
+                        f"returns all three or an error, so this is partial - "
+                        f"wait for the next export.")
+    stamps = [datetime.fromisoformat(f["last_modified"].replace("Z", "+00:00"))
+              for f in files if f.get("last_modified")]
+    if len(stamps) > 1 and max(stamps) - min(stamps) > TORN_SNAPSHOT_TOLERANCE:
+        msg = (f"the three files were written {max(stamps) - min(stamps)} "
+               f"apart, more than the {TORN_SNAPSHOT_TOLERANCE} tolerance. "
+               f"The exporter was caught mid-write, so actions may reference "
+               f"items the item file does not have yet.")
+        if not allow_torn:
+            raise DumpError(msg + "\nPass --allow-torn to proceed anyway.")
+        print(f"  WARNING: {msg}")
+
+
+def stream_records(url):
+    """Yield one parsed object per line, straight off the wire.
+
+    Pre-signed, so NO Authorization header - adding one makes S3 refuse.
+    The files are gzip but named .jsonl, so the magic bytes are sniffed
+    rather than trusted; peek() leaves them in the buffer for the reader
+    that follows.
+    """
+    with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT) as resp:
+        if resp.status_code != 200:
+            raise DumpError(f"download failed: {resp.status_code} "
+                            f"{resp.text[:200]}")
+        resp.raw.decode_content = True
+        buffered = io.BufferedReader(resp.raw)
+        if buffered.peek(2)[:2] == GZIP_MAGIC:
+            buffered = gzip.GzipFile(fileobj=buffered)
+        for n, line in enumerate(io.TextIOWrapper(buffered, encoding="utf-8"),
+                                 start=1):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError as exc:
+                print(f"    WARNING: line {n}: {exc}")
+
+
+def user_row(r, instance):
+    return {
+        "instance": instance, "user_id": r["user_id"],
+        "user_network": r.get("user_network"),
+        "lifecycle_status": r.get("lifecycle_status"),
+        "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
+        "onboarded_by_org_id": r.get("onboarded_by_org_id"),
+        "onboarded_via": r.get("onboarded_via"),
+        "onboarded_at": r.get("onboarded_at"),
+        # Masked at source: '2***' for age, 'D***' for gender.
+        "user_state": r.get("user_state") or {},
+        "tags": r.get("tags") or {},
+    }
+
+
+def item_row(r, instance):
+    locations = r.get("item_locations") or []
+    lat, lng = (locations[0].get("lat"), locations[0].get("lng")) \
+        if locations else (None, None)
+    return {
+        "instance": instance, "item_id": r["item_id"],
+        "item_network": r.get("item_network"),
+        "item_domain": r.get("item_domain"), "item_type": r.get("item_type"),
+        "lifecycle_status": r.get("lifecycle_status"),
+        "created_by": r.get("created_by"), "lat": lat, "lng": lng,
+        "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
+        # Kept whole: the item schema is not settled, and a column per key
+        # means a migration every time the platform adds a field.
+        "item_state": r.get("item_state") or {},
+    }
+
+
+def action_row(r, instance):
+    return {
+        "instance": instance, "action_id": r["action_id"],
+        "partition_network": r.get("partition_network"),
+        "action_type": r.get("action_type"),
+        "action_status": r.get("action_status"),
+        "actor_user_id": r.get("actor_user_id"), "item_id": r.get("item_id"),
+        "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
+        "action_state": r.get("action_state") or {},
+    }
+
+
+# Order matters: users and items are streamed first so that the id sets are
+# populated before item_actions is checked against them.
+SPECS = (
+    ("user",         "purple_users",   "instance,user_id",   user_row, "user_id"),
+    ("items",        "purple_items",   "instance,item_id",   item_row, "item_id"),
+    ("item_actions", "purple_actions", "instance,action_id", action_row, "action_id"),
+)
+
+
+def push(table, conflict, rows):
+    """Upsert a chunk. db.upsert collapses duplicate keys for us - Postgres
+    rejects a statement that updates a row it just inserted (21000), and the
+    dump does contain repeats."""
+    return db.upsert(table, rows, conflict, chunk=CHUNK)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--check", action="store_true",
+                    help="authenticate, show what the snapshot holds, exit")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="stream everything and count it, write nothing")
+    ap.add_argument("--allow-torn", action="store_true",
+                    help="proceed even if the three files disagree on time")
+    ap.add_argument("--instance", default=os.getenv("PD_INSTANCE", "PD"),
+                    help="value for the instance column (default: PD)")
+    args = ap.parse_args()
+
+    writing = not (args.check or args.dry_run)
+    if writing:
+        db.credentials()        # refuses the Blue Dots project, and a missing key
+
+    dump = get_dump(get_token())
+    files = dump.get("files") or []
+    print(f"network {dump.get('network')}   instance {dump.get('instance')}   "
+          f"expires {dump.get('expires_at')}")
+    for f in files:
+        size = f.get("size_bytes")
+        print(f"  {str(f.get('table')):<14}"
+              f"{(f'{size / 1048576:.1f} MB' if size else '?'):>10}  "
+              f"{f.get('last_modified')}")
+    check_snapshot(files, args.allow_torn)
+
+    if args.check:
+        print("\n--check: authenticated, snapshot looks complete.")
+        return
+
+    by_table = {f["table"]: f["url"] for f in files}
+    ids = {"user_id": set(), "item_id": set()}
+    dangling = 0
+    print()
+
+    for stem, table, conflict, build, id_field in SPECS:
+        total, batch = 0, []
+        for record in stream_records(by_table[stem]):
+            row = build(record, args.instance)
+            if id_field in ids:
+                ids[id_field].add(row[id_field])
+            elif row.get("item_id") and row["item_id"] not in ids["item_id"]:
+                # A torn snapshot shows up here: an action whose item never
+                # arrived. Counted, not dropped - the row is still a fact.
+                dangling += 1
+            batch.append(row)
+            total += 1
+            if len(batch) >= CHUNK:
+                if writing:
+                    push(table, conflict, batch)
+                batch = []
+        if batch and writing:
+            push(table, conflict, batch)
+        print(f"  {table:<16}{total:>8} rows"
+              f"{'' if writing else '  (not written)'}")
+
+    if dangling:
+        print(f"\n  {dangling} actions reference an item not in this snapshot. "
+              f"Expected if the export was mid-write.")
+    if not writing:
+        print("\n--dry-run: nothing written.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except DumpError as exc:
+        raise SystemExit(f"ERROR: {exc}")

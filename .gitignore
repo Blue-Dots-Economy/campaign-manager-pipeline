@@ -35,3 +35,10 @@ __pycache__/
 
 # The pause list. set_pause_status.py reads it, so keep it on disk.
 /operation_rozgar_jobs_final.xlsx
+
+# Sheet exports. "Operation Rozgar_KKB_Master - Sheet1 (36).csv" arrived with
+# 77,417 rows carrying a phone column - the whole seeker list. These are
+# downloaded from Google Sheets for ad-hoc checks and have no business in a
+# repository, least of all a public one.
+*.csv
+!**/sql/*.csv
