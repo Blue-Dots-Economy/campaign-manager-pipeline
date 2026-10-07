@@ -27,7 +27,7 @@ def require_url():
     if not url:
         raise SystemExit(
             "DATABASE_URL is not set.\n"
-            '  $env:DATABASE_URL = "postgresql://purple:<password>@localhost:5433/purple"\n'
+            '  $env:DATABASE_URL = "postgresql://purple:<password>@localhost:5433/campaign-manager-purpledots"\n'
             "  (or put it in .env - see .env.example)")
     return url
 

@@ -12,7 +12,7 @@ Raya calls -> Postgres. A batch job: it runs, writes, exits.
 
 ```
 POSTGRES_PASSWORD=<choose anything>
-DATABASE_URL=postgresql://purple:<the same one>@localhost:5433/purple
+DATABASE_URL=postgresql://purple:<the same one>@localhost:5433/campaign-manager-purpledots
 RAYA_API_KEY=<ALIMCO / Purple Dots Raya key>
 ```
 
