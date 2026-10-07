@@ -11,3 +11,12 @@ __pycache__/
 # and disability percentage. Keeping a file and committing it are not
 # the same decision; an earlier negation here conflated them.
 data/*.csv
+
+
+# The curl walkthrough carries the live Raya and Supabase keys inline, so the
+# team can paste and run without a .env. That makes it a credential file, not
+# a doc - it is shared directly with the team and never committed.
+CURL_WALKTHROUGH.md
+
+# Email draft carrying the same live keys as the walkthrough.
+EMAIL_DRAFT.txt

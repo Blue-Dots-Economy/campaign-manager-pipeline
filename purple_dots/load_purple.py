@@ -4,16 +4,27 @@ Writes to the PURPLE DOTS Supabase project only. The URL and key come from
 this folder's own .env, and nothing here imports from the Blue Dots pipeline -
 see README for why that separation is physical rather than just a convention.
 
-Purple Dots has no batches in the Raya account we can currently see, so this
-walks /api/call?agent_id= per agent rather than /api/batch/{id}/contacts.
-That endpoint returns every call an agent made, batch or no batch, so it is
-the right one either way.
+ONLY CALLS THAT CAME THROUGH A BATCH ARE LOADED.
+This walks /api/batch/{id}/contacts, so a call with no batch is not merely
+filtered out - it is never fetched. That matters: 933 batch-less pilot and
+demo calls were deleted from this table on purpose on 30 Sept 2026, and an
+earlier version of this script walked /api/call?agent_id= instead, which
+returns every call an agent made, batch or not. It then dropped the unwanted
+ones in memory, so the only thing standing between a normal run and
+restoring all 933 was remembering to pass --batch. Now there is nothing to
+remember. (That older shape made sense when written - the Raya key showed
+zero Purple Dots batches, so there was nothing else to walk. There are four
+now.)
 
-    python load_purple.py --dry-run            # writes a CSV, touches nothing
+--batch still narrows to specific batches, and now also skips fetching the
+others, which is the difference between four API calls and forty.
+
+    python load_purple.py --dry-run            # builds rows, touches nothing
     python load_purple.py --dry-run --limit 20
-    python load_purple.py                      # pushes to Supabase
-    python load_purple.py --batch 2385         # one batch only
+    python load_purple.py                      # pushes every batch
+    python load_purple.py --batch 3031         # one batch only
     python load_purple.py --agent <id>         # one agent only
+    python load_purple.py --batches            # what exists, and what is loaded
     python load_purple.py --agents             # just list what is out there
 """
 import argparse
@@ -22,12 +33,18 @@ import csv
 import io
 import json
 import os
+import sys
 
 import requests
 from dotenv import load_dotenv
 
-from raya_client import (fetch_all_agents, fetch_all_batches, fetch_all_calls,
-                         fetch_all_contacts, fetch_call_detail, fetch_calls)
+# fetch_all_calls returns batch-less calls, so it is reachable ONLY from
+# the --inbound path, where batch-less is what an inbound call is. The
+# normal outbound run never calls it.
+from raya_client import (fetch_all_agents, fetch_all_batches,
+                         fetch_all_calls, fetch_all_contacts,
+                         fetch_call_detail, fetch_calls, is_inbound)
+import db
 from transform_purple import make_connections, make_row
 
 load_dotenv()
@@ -70,15 +87,64 @@ EXCLUDED = {
     "1e8faf6a-db15-4796-81f1-55b9e9aab358",   # Testing Agent- Purple Dots
 }
 
+# Bots that answer calls. Kept apart from AGENTS because the two are fetched
+# completely differently: an outbound call belongs to a batch, an inbound one
+# cannot, so --inbound walks /api/call?agent_id= instead.
+#
+# ONE BOT, confirmed by the sheet owner on 7 Oct 2026. 'Testing Agent- Purple
+# Dots' (1e8faf6a) also answers calls - 225 of them - and is deliberately NOT
+# here. It is what its name says. Its configuration settles it rather than
+# the name doing so: it has no output_instructions and an empty tool list, so
+# its calls produce a transcript and nothing else, while this bot has 8,902
+# characters of output instructions, 18,340 of tools, and has already
+# recorded 43 provider connections in 26 calls.
+#
+# Two numbers are involved, which is the thing to check if this ever looks
+# wrong: 918044484499 reaches the testing bot, 917946350861 reaches this one.
+INBOUND_AGENTS = {
+    "a1567240-052e-4ec0-be49-be2ca2d58ea6": "Purple-Dots-Inbound-061020261110",
+}
 
-def env(need_supabase=True):
-    """--agents only reads from Raya, so it should not need Supabase creds."""
-    url = os.getenv("SUPABASE_URL")
-    key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+# Numbers the team rang the inbound bots from while testing. Their calls are
+# real in Raya and must not count as beneficiary traffic, so their rows are
+# written with test_flag = true rather than dropped - the same decision the
+# Blue Dots pipeline made, and for the same reason: a deleted row makes our
+# count disagree with Raya's forever, and a flag set by hand in Supabase is
+# overwritten by the next upsert.
+#
+# Given by the sheet owner on 7 Oct 2026. Everything else counts as a real
+# caller - including 7946350287, which made 67 calls in two days and looks
+# like testing but was not named, so it is not guessed at.
+#
+# Extend with PD_TEST_PHONES in .env rather than editing this; the set below
+# is the floor, not the whole list.
+TEST_PHONES: set[str] = {"8065295804"}
+
+
+def is_test_caller(call):
+    """True if this inbound call came from a known team number.
+
+    Compares on digits only. Raya returns the same number as '8065295804'
+    from one bot and '+918065295804' from another, and a string compare
+    would quietly flag neither.
+    """
+    known = TEST_PHONES | {x.strip() for x in
+                           os.getenv("PD_TEST_PHONES", "").replace(",", " ").split()
+                           if x.strip()}
+    if not known:
+        return False
+    digits = "".join(ch for ch in str(call.get("caller_no") or "")
+                     if ch.isdigit())[-10:]
+    return bool(digits) and digits in {
+        "".join(ch for ch in p if ch.isdigit())[-10:] for p in known}
+
+
+def env(need_db=True):
+    """--agents only reads from Raya, so it should not need a database."""
     api = os.getenv("RAYA_API_KEY")
     required = [("RAYA_API_KEY", api)]
-    if need_supabase:
-        required += [("SUPABASE_URL", url), ("SUPABASE_SECRET_KEY", key)]
+    if need_db:
+        required.append(("DATABASE_URL", os.getenv("DATABASE_URL")))
     missing = [n for n, v in required if not v]
     if missing:
         # Two ways to run this, and telling a container user to create a .env
@@ -88,13 +154,14 @@ def env(need_supabase=True):
                if in_docker else
                "copy .env.example to .env and fill it in.")
         raise SystemExit(f"missing: {', '.join(missing)}\n{how}")
-    # a wrong-project write is the failure this whole folder exists to prevent,
-    # so it is checked rather than trusted
-    if url and "vqvonmoktpvfvzlhtiqo" in url:
-        raise SystemExit(
-            "SUPABASE_URL points at the Blue Dots project. This loader writes "
-            "Purple Dots data; set it to the Purple Dots project.")
-    return url, key, api
+    # A wrong-database write is the failure this whole folder exists to
+    # prevent. The old guard compared SUPABASE_URL against the Blue Dots
+    # project id; with Postgres there is no equivalent to check against, so
+    # the separation now rests entirely on DATABASE_URL pointing somewhere
+    # Blue Dots does not use. Blue Dots talks PostgREST to its own Supabase
+    # project and reads no DATABASE_URL at all, so the two cannot collide by
+    # configuration alone - but there is no longer a check that says so.
+    return api
 
 
 def list_agents(api_key):
@@ -113,7 +180,7 @@ def list_agents(api_key):
         print(f"{str(total):>7}  {mark:<11}{name!r}  {aid}")
 
 
-def check(api_key, url, key):
+def check(api_key):
     """Every connection this loader needs, verified before it is needed.
 
     A run fetches for minutes before it writes anything, so a bad key or a
@@ -147,72 +214,60 @@ def check(api_key, url, key):
        + ("" if len(found) == len(want)
           else " - this key may be the wrong account, see README"))
 
-    print("Supabase")
-    # The URL is printed, so which project it is can be read off directly -
-    # no separate line for it. The real guard is in env(), which refuses to
-    # run against Blue Dots rather than merely reporting on it.
-    ok("SUPABASE_URL set", bool(url), url or "missing")
-    ok("SUPABASE_SECRET_KEY set", bool(key), "***" if key else "missing")
-
-    if url and key:
-        h = {"apikey": key, "Authorization": f"Bearer {key}"}
+    # Postgres or Supabase, depending on DATABASE_URL. db.describe() names
+    # which, so a run can never leave you guessing where the rows went.
+    print("Database")
+    ok("backend", True, db.describe())
+    if os.getenv("DATABASE_URL"):
         for table in (TABLE, CONN_TABLE):
             try:
-                r = requests.get(f"{url.rstrip('/')}/rest/v1/{table}",
-                                 headers={**h, "Prefer": "count=exact"},
-                                 params={"select": "call_id", "limit": 1}, timeout=60)
-                if r.status_code == 404:
-                    ok(table, False, "does not exist - run sql/create_purple_dots.sql")
-                elif r.status_code >= 400:
-                    ok(table, False, f"{r.status_code} {r.text[:40]}")
-                else:
-                    n = r.headers.get("content-range", "0-0/0").split("/")[-1]
-                    ok(table, True, f"{n} rows")
+                n = db.table_count(table)
+                ok(table, n is not None,
+                   f"{n} rows" if n is not None
+                   else "does not exist - run sql/create_purple_dots.sql")
             except Exception as exc:
-                ok(table, False, str(exc)[:60])
-        # Writable? A PATCH whose filter matches nothing changes no data but
-        # still fails with 403 on a read-only key, which is what we want to
-        # learn now rather than after twenty minutes of fetching.
+                ok(table, False, str(exc).strip().splitlines()[0][:60])
         try:
-            r = requests.patch(f"{url.rstrip('/')}/rest/v1/{TABLE}",
-                               headers={**h, "Content-Type": "application/json",
-                                        "Prefer": "return=minimal"},
-                               params={"call_id": "eq.__preflight_no_match__"},
-                               json={"test_flag": True}, timeout=60)
-            ok("write permission", r.status_code < 400,
-               "" if r.status_code < 400 else f"{r.status_code} - key is read-only")
+            good, detail = db.can_write(TABLE)
+            ok("write permission", good, detail)
         except Exception as exc:
-            ok("write permission", False, str(exc)[:60])
+            ok("write permission", False, str(exc).strip().splitlines()[0][:60])
 
     print()
     print("all checks passed" if not bad else f"{len(bad)} FAILED: {', '.join(bad)}")
     return len(bad)
 
 
-def list_batches(api_key, url, key):
+def list_batches(api_key):
     """Every batch, with whether it has already been loaded.
 
     Without this the only record of which batches are real lives in a comment
-    on AGENTS, which nobody running the container ever sees - and getting it
-    wrong is expensive: an unscoped run restores roughly 950 deliberately
-    deleted test rows. So the tool answers the question instead of the
-    operator having to know.
+    on AGENTS, which nobody running the container ever sees. So the tool
+    answers the question instead of the operator having to know.
 
-    'dialled' is the number to read, not 'loaded'. A batch can hold hundreds
-    of contacts and have called none of them.
+    THE COLUMN IS 'answered', NOT 'dialled'
+    Raya's completed_contacts counts people who PICKED UP, not people who
+    were called. Batch 3155 shows 646 of 1098 and every one of those 1098
+    was dialled - 452 of them simply did not answer. Calling it 'dialled'
+    cost an afternoon: a batch reading 646/1098 looks half-finished, and
+    it is not.
+
+    What it is good for is spotting a trial. A batch nobody answered may
+    still be real; a batch with one contact in it is a smoke test. Read it
+    alongside 'total'.
     """
     loaded = collections.Counter()
-    r = requests.get(f"{url.rstrip('/')}/rest/v1/{TABLE}",
-                     headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                     params={"select": "batch_id", "limit": 10000}, timeout=300)
-    if r.status_code < 400:
-        for row in r.json():
-            if row.get("batch_id"):
-                loaded[str(row["batch_id"])] += 1
+    try:
+        for value in db.column_values(TABLE, "batch_id"):
+            loaded[str(value)] += 1
+    except Exception:
+        # A missing table here is not fatal - the listing still shows what
+        # Raya has, with 'in db' simply reading zero.
+        pass
 
-    print(f"{'batch':<8}{'dialled':>8}{'total':>7}{'in db':>8}  "
+    print(f"{'batch':<8}{'answered':>9}{'total':>7}{'in db':>8}  "
           f"{'created':<12}name")
-    seen = set()
+    seen, listed = set(), []
     for aid, agent in AGENTS.items():
         if aid in EXCLUDED:
             continue
@@ -224,122 +279,135 @@ def list_batches(api_key, url, key):
         for b in sorted(batches, key=lambda x: str(x.get("created_at") or "")):
             bid = str(b.get("id"))
             seen.add(bid)
-            done = b.get("completed_contacts") or 0
+            # completed_contacts is how many ANSWERED, not how many were
+            # called. A batch can have every contact dialled and still read
+            # a fraction here.
+            answered = b.get("completed_contacts") or 0
             have = loaded.get(bid, 0)
-            if not done and not have:
-                note = "   never dialled - nothing to load"
+            if not answered and not have:
+                note = "   nobody answered - nothing to load"
             elif have:
                 note = ""
             else:
                 note = "   <-- NOT LOADED"
-            print(f"{bid:<8}{done:>8}{b.get('total_contacts') or 0:>7}"
+            print(f"{bid:<8}{answered:>9}{b.get('total_contacts') or 0:>7}"
                   f"{have:>8}  {str(b.get('created_at'))[:10]:<12}"
                   f"{str(b.get('name'))[:30]!r}{note}")
+            listed.append({"id": bid, "answered": answered, "loaded": have,
+                           "name": str(b.get("name"))})
     orphan = sum(n for b, n in loaded.items() if b not in seen and b != "None")
     if orphan:
         print(f"\n  {orphan} loaded rows belong to a batch this key cannot see")
-    print("\nLoad one with:  --batch <id>.  Without --batch every call is "
-          "loaded, including test data.")
+    return listed
 
 
-def existing_ids(url, key):
-    ids, offset = set(), 0
-    while True:
-        r = requests.get(f"{url.rstrip('/')}/rest/v1/{TABLE}",
-                         headers={"apikey": key, "Authorization": f"Bearer {key}"},
-                         params={"select": "call_id", "order": "call_id",
-                                 "offset": offset, "limit": 1000}, timeout=300)
-        if r.status_code == 404:
-            raise SystemExit(f"{TABLE} does not exist yet - "
-                             f"run sql/create_purple_dots.sql first.")
-        if r.status_code >= 400:
-            raise SystemExit(f"{TABLE}: {r.status_code} {r.text[:300]}")
-        chunk = r.json()
-        if not chunk:
-            break
-        ids.update(str(c["call_id"]) for c in chunk)
-        if len(chunk) < 1000:
-            break
-        offset += len(chunk)
-    return ids
+def _ids(name):
+    """A comma or space separated batch list from the environment."""
+    raw = os.getenv(name, "")
+    return {x.strip() for x in raw.replace(",", " ").split() if x.strip()}
 
 
-def push(url, key, rows, size=200, table=TABLE, on_conflict="call_id"):
-    endpoint = f"{url.rstrip('/')}/rest/v1/{table}"
-    headers = {"apikey": key, "Authorization": f"Bearer {key}",
-               "Content-Type": "application/json",
-               "Prefer": "resolution=merge-duplicates,return=minimal"}
-    # PostgREST refuses a batch that upserts the same key twice - "ON CONFLICT
-    # DO UPDATE command cannot affect row a second time" - so duplicates are
-    # collapsed before they are sent rather than after a 500.
-    keyed, seen = [], set()
-    for r in rows:
-        k = tuple(r.get(c) for c in on_conflict.split(","))
-        if k in seen:
+def classify(listed):
+    """Decide what to load and what to flag. Returns (ids, flagged).
+
+    Every batch anyone answered is loaded. PD_TEST_BATCHES only decides
+    whether its rows carry test_flag = true.
+
+        on PD_TEST_BATCHES  ->  loaded, flagged
+        anything else       ->  loaded clean
+
+    ONE LIST, NOT TWO
+    An earlier version also kept PD_REAL_BATCHES and treated anything in
+    neither as suspect. It was safer on paper and wrong in practice: every
+    new campaign needed a config edit before its data counted, which is a
+    step that gets forgotten exactly when things are busy. A new campaign
+    now just works.
+
+    The cost is that a new TEST batch loads until someone adds it to the
+    list. That is the right way round - test batches are rare, small and
+    known about in advance, while campaigns are the thing the pipeline
+    exists for.
+
+    FLAGGED, NOT SKIPPED
+    A batch wrongly listed here would otherwise go missing silently, and
+    nobody notices absent calls for months. Flagged is recoverable in one
+    UPDATE and the rows stay countable against Raya. Reporting reads
+    test_flag, so flagged traffic stays out of the numbers either way.
+
+    THE LIST IS SET ONCE
+    PD_TEST_BATCHES lives in .env, not here, and is touched only when a new
+    test batch appears - which is rare. A new CAMPAIGN needs no edit at all:
+    it loads clean and counts immediately.
+
+    Inbound calls from a team number are flagged the same way, but per call
+    rather than per batch, in main().
+    """
+    test = _ids("PD_TEST_BATCHES")
+
+    load, flagged = [], set()
+    for b in listed:
+        if not b["answered"]:
+            continue          # nobody picked up - no call_output to load
+        # Deliberately NOT skipping batches that already have rows. A batch
+        # is not finished the moment its first call lands: an old one gains
+        # calls when Raya retries an unanswered contact, which is how three
+        # calls in batch 3018 sat unloaded for a week. Skipping on "has any
+        # rows" meant those later calls could never arrive.
+        #
+        # Nothing is re-fetched as a result. existing_ids() drops every call
+        # already stored before any detail request is made, so including a
+        # loaded batch costs one contacts listing and nothing else.
+        load.append(b["id"])
+        if b["id"] in test:
+            flagged.add(b["id"])
+
+    if not load:
+        print("\nNothing to load.")
+        return [], set()
+
+    print()
+    for b in listed:
+        if b["id"] not in load:
             continue
-        seen.add(k)
-        keyed.append(r)
-    if len(keyed) != len(rows):
-        print(f"    {len(rows) - len(keyed)} duplicate keys collapsed")
-    rows = keyed
+        mark = "load + test_flag" if b["id"] in flagged else "load"
+        print(f"  {b['id']:<8}{b['answered']:>6} answered {b['loaded']:>6} "
+              f"in db   {b['name'][:28]:<30}{mark}")
 
-    done = 0
-    for start in range(0, len(rows), size):
-        chunk = rows[start:start + size]
-        # PostgREST rejects the whole batch unless every object carries the
-        # same keys, so the rows are squared off before they go
-        keys = sorted({k for r in chunk for k in r})
-        squared = [{k: r.get(k) for k in keys} for r in chunk]
-        r = requests.post(endpoint, headers=headers,
-                          params={"on_conflict": on_conflict},
-                          json=squared, timeout=300)
-        if r.status_code >= 400:
-            raise SystemExit(f"push failed at row {start}: "
-                             f"{r.status_code} {r.text[:400]}")
-        done += len(chunk)
-        print(f"    {done}/{len(rows)}")
+    if flagged:
+        print(f"\n  {len(flagged)} batch(es) in PD_TEST_BATCHES carry "
+              f"test_flag = true, so reporting ignores them.")
+
+    return load, flagged
+
+
+def existing_ids():
+    """Every call_id already stored, so those calls are never fetched again."""
+    return {str(v) for v in db.column_values(TABLE, "call_id")}
+
+
+def push(rows, size=200, table=TABLE, on_conflict="call_id"):
+    """Upsert. db.upsert collapses duplicate keys and squares the rows off.
+
+    Both are needed on either backend for the same reason: one statement
+    cannot update a row it just inserted (Postgres 21000, and PostgREST's
+    "ON CONFLICT DO UPDATE command cannot affect row a second time"), and
+    every row in one statement must carry the same columns.
+    """
+    done = db.upsert(table, rows, on_conflict, chunk=size)
+    if done != len(rows):
+        print(f"    {len(rows) - done} duplicate keys collapsed")
+    print(f"    {done}/{len(rows)}")
     return done
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--dry-run", action="store_true")
-    ap.add_argument("--agents", action="store_true",
-                    help="list the Purple Dots agents Raya can see, and exit")
-    ap.add_argument("--batches", action="store_true",
-                    help="list every batch, what it dialled and whether it is "
-                         "already loaded, then exit. Start here.")
-    ap.add_argument("--check", action="store_true",
-                    help="verify every connection and table, then exit. "
-                         "Non-zero exit if anything fails.")
-    ap.add_argument("--agent", action="append", metavar="ID",
-                    help="load only this agent; repeatable. Default: every "
-                         "agent in AGENTS except the test bots")
-    ap.add_argument("--batch", action="append", metavar="ID",
-                    help="load only calls from this batch; repeatable. "
-                         "Batch-less calls are excluded when this is set.")
-    ap.add_argument("--limit", type=int, help="stop after N calls (smoke test)")
-    ap.add_argument("--csv", action="store_true",
-                    help="also write the rows to data/ for inspection. Off by "
-                         "default: the pipeline's job is to land data in "
-                         "Supabase, not to leave copies on disk.")
-    args = ap.parse_args()
+def batch_walk(args, api_key):
+    """Every call that came through a batch, plus its contact record.
 
-    # --check reports on missing credentials rather than exiting on them,
-    # which is the whole point of a preflight.
-    if args.check:
-        url = os.getenv("SUPABASE_URL", "").rstrip("/")
-        key = os.getenv("SUPABASE_SECRET_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
-        raise SystemExit(check(os.getenv("RAYA_API_KEY"), url, key))
-
-    url, key, api_key = env(need_supabase=not args.agents)
-    if args.agents:
-        list_agents(api_key)
-        return
-    if args.batches:
-        list_batches(api_key, url, key)
-        return
-
+    Returns (calls, contacts) where contacts maps a call uuid to its
+    (contact, batch) pair. A call that belongs to no batch is not
+    reachable from here at all, which is the point - see the module
+    docstring.
+    """
     # Batches first. A batched call carries a contact record, and that is the
     # only place section A of the sheet lives - contact_name, contact_reference,
     # the referring support centre. It also reports status as "Unanswered"
@@ -358,10 +426,15 @@ def main():
     print(f"Agents: {', '.join(targets.values())}")
     print()
 
+    wanted = {str(b) for b in args.batch} if args.batch else None
+
     print("Walking batches...")
     contacts = {}          # call uuid -> (contact, batch)
+    found = []             # the calls themselves, in batch order
     for aid, name in targets.items():
         for b in fetch_all_batches(api_key, aid):
+            if wanted is not None and str(b.get("id")) not in wanted:
+                continue
             try:
                 cs = fetch_all_contacts(api_key, b["id"])
             except Exception as exc:
@@ -372,50 +445,107 @@ def main():
                 for call in (c.get("calls") or []):
                     if isinstance(call, dict) and call.get("uuid"):
                         contacts[str(call["uuid"])] = (c, b)
-    print(f"  {len(contacts)} calls came through a batch")
+                        call["_agent_id"], call["_agent_name"] = aid, name
+                        found.append(call)
+    print(f"  {len(found)} calls came through a batch")
+    if wanted:
+        missing = wanted - {str(b["id"]) for _, b in contacts.values()}
+        if missing:
+            print(f"  no such batch for these agents: {', '.join(sorted(missing))}")
+    return found, contacts
 
-    print()
-    print("Listing calls per agent...")
-    found = []
-    for aid, name in targets.items():
-        try:
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--agents", action="store_true",
+                    help="list the Purple Dots agents Raya can see, and exit")
+    ap.add_argument("--batches", action="store_true",
+                    help="list every batch, how many answered and whether it is "
+                         "already loaded, then exit. Start here.")
+    ap.add_argument("--check", action="store_true",
+                    help="verify every connection and table, then exit. "
+                         "Non-zero exit if anything fails.")
+    ap.add_argument("--agent", action="append", metavar="ID",
+                    help="load only this agent; repeatable. Default: every "
+                         "agent in AGENTS except the test bots")
+    ap.add_argument("--batch", action="append", metavar="ID",
+                    help="load only calls from this batch; repeatable.")
+    ap.add_argument("--inbound", action="store_true",
+                    help="load calls people made TO the bots instead of "
+                         "calls the bots made out. These belong to no batch, "
+                         "so it is a separate run - never mixed into one.")
+    ap.add_argument("--limit", type=int, help="stop after N calls (smoke test)")
+    ap.add_argument("--csv", action="store_true",
+                    help="also write the rows to data/ for inspection. Off by "
+                         "default: the pipeline's job is to land data in "
+                         "Supabase, not to leave copies on disk.")
+    args = ap.parse_args()
+
+    # --check reports on missing credentials rather than exiting on them,
+    # which is the whole point of a preflight.
+    if args.check:
+        raise SystemExit(check(os.getenv("RAYA_API_KEY")))
+
+    api_key = env(need_db=not args.agents)
+    if args.agents:
+        list_agents(api_key)
+        return
+    if args.batches:
+        list_batches(api_key)
+        return
+
+    # No --batch: list what exists, then load it all, flagging whatever is
+    # named in PD_TEST_BATCHES. Walking only batches removed the 933
+    # batch-less calls, but a test BATCH is still a batch, and nothing in the
+    # data separates one from a real campaign - 'purplec' had one contact,
+    # and batch 2441 had nine and is real. So the list is the judgement, and
+    # it is kept in .env rather than here.
+    # Empty unless classify() fills it. --batch and --inbound both bypass
+    # that branch, and an explicit --batch 2992 is taken at face value: if
+    # someone names a test batch by id they mean to load it as it is.
+    quarantined = set()
+    if not args.batch and not args.inbound:
+        args.batch, quarantined = classify(list_batches(api_key))
+        if not args.batch:
+            return
+
+    if args.inbound:
+        targets = dict(INBOUND_AGENTS)
+        if args.agent:
+            targets = {a: INBOUND_AGENTS.get(a, a) for a in args.agent}
+        print(f"Inbound agents: {', '.join(targets.values())}")
+        print()
+        print("Listing calls...")
+        contacts, found = {}, []
+        for aid, name in targets.items():
             calls = fetch_all_calls(api_key, aid)
-        except Exception as exc:
-            print(f"  {name}: {exc}")
-            continue
-        print(f"  {len(calls):>5}  {name}")
-        for c in calls:
-            c["_agent_id"], c["_agent_name"] = aid, name
-        found.extend(calls)
-    print(f"  {len(found)} calls total")
+            # The direction test is the whole point: these bots carry both.
+            # 'Testing Agent' holds 223 inbound calls and 4 outbound ones, and
+            # the outbound ones are test traffic we already exclude.
+            inbound = [c for c in calls if is_inbound(c)]
+            print(f"  {len(inbound):>5} inbound of {len(calls):>5}  {name}")
+            for c in inbound:
+                c["_agent_id"], c["_agent_name"] = aid, name
+            found.extend(inbound)
+        print(f"  {len(found)} inbound calls")
+        if not found:
+            raise SystemExit("no inbound calls found for those agents.")
+    else:
+        found, contacts = batch_walk(args, api_key)
     if not found:
         raise SystemExit(
-            "No calls found. This Raya key may not see the Purple Dots "
-            "account - run --agents, and see README.")
+            "No calls found in any batch. Either this Raya key cannot see the "
+            "Purple Dots account - run --agents - or the batch ids given do "
+            "not belong to these agents. See --batches for what exists.")
 
-    # --batch narrows to specific batches. Applied here, before the
-    # already-loaded check, so a scoped run cannot quietly widen: without it a
-    # re-run puts back every call that was deliberately deleted.
-    if args.batch:
-        wanted = {str(b) for b in args.batch}
-        before = len(found)
-        found = [c for c in found
-                 if str((contacts.get(str(c.get("uuid"))) or (None, {}))[1]
-                        .get("id", "")) in wanted]
-        print(f"  --batch {', '.join(sorted(wanted))}: "
-              f"{len(found)} of {before} calls kept")
-        if not found:
-            raise SystemExit("no calls in those batches - check the batch ids "
-                             "against the 'Walking batches' list above.")
-
-    if key:
-        seen = existing_ids(url, key)
-        fresh = [c for c in found if str(c.get("uuid")) not in seen]
-        print(f"  {len(found) - len(fresh)} already loaded, {len(fresh)} new")
-    else:
-        # dry run with no Supabase configured yet: build everything anyway
-        seen, fresh = set(), found
-        print(f"  no Supabase configured - treating all {len(fresh)} as new")
+    # The call-level check, and the reason a re-run is cheap: every uuid
+    # already stored is dropped here, before the one-request-per-call detail
+    # fetch below. It is also what lets a batch be re-walked every time -
+    # Raya keeps adding retry calls to batches long after they look finished.
+    seen = existing_ids()
+    fresh = [c for c in found if str(c.get("uuid")) not in seen]
+    print(f"  {len(found) - len(fresh)} already loaded, {len(fresh)} new")
     if args.limit:
         fresh = fresh[:args.limit]
         print(f"  --limit: keeping {len(fresh)}")
@@ -434,6 +564,14 @@ def main():
         contact, batch = contacts.get(str(call.get("uuid")), (None, None))
         row = make_row(detail, agent_name=call["_agent_name"],
                        contact=contact, batch=batch)
+        # Set here rather than in make_row: whose numbers are the team's, and
+        # which batches are trials, is loading policy that changes when
+        # someone joins or a campaign runs. The transform stays a pure
+        # function of what Raya returned.
+        if args.inbound and is_test_caller(detail):
+            row["test_flag"] = True
+        elif str(row.get("batch_id")) in quarantined:
+            row["test_flag"] = True
         conns.extend(make_connections(detail, row["call_id"]))
         if not row.get("call_summary") and not row.get("call_status"):
             thin += 1
@@ -499,11 +637,11 @@ def main():
         print("\nnothing new to push.")
         return
     print(f"\nPushing {len(rows)} rows to {TABLE}...")
-    print(f"done, {push(url, key, rows)} rows")
+    print(f"done, {push(rows)} rows")
     if conns:
         # after the calls, never before: the FK points at them
         print(f"\nPushing {len(conns)} connections to {CONN_TABLE}...")
-        n = push(url, key, conns, table=CONN_TABLE,
+        n = push(conns, table=CONN_TABLE,
                  on_conflict="call_id,provider_item_id")
         print(f"done, {n} rows")
 

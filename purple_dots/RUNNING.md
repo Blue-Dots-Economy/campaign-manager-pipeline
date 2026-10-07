@@ -1,19 +1,6 @@
 # Running the Purple Dots loader
 
-Raya calls -> Supabase. A batch job: it runs, writes, exits. You need
-Docker and three credentials; you do not need Python.
-
-## Everyone shares one database
-
- **Re-running is safe** - rows upsert on `call_id`,
-so loading a batch twice gives `0 new`.
-
- **A wrong scope is not** - a run
-without `--batch` restores ~950 test rows that were deleted on purpose on
-30 September 2026, and there is no undo.
-
-Say in the team channel which batch you are loading. We share one service
-key, so the row count is the only record of who ran what.
+Raya calls -> Supabase. A batch job: it runs, writes, exits.
 
 ## Setup, once
 
@@ -33,9 +20,9 @@ docker build -t purple-dots .
 Rebuild whenever you pull. The tables already exist; on a fresh Supabase
 project run `sql/create_purple_dots.sql` first.
 
-## Every run: three commands
+## Every run
 
-**1. Check if everything reachable** 
+**1. Check everything is reachable**
 ```
 docker run --rm --env-file .env purple-dots --check
 ```
@@ -50,31 +37,62 @@ Supabase
   [ok ] write permission
 ```
 
-**2. List of batches**
+**2. Load everything**
 
 ```
-docker run --rm --env-file .env purple-dots --batches
+docker run --rm --env-file .env purple-dots
 ```
 
-```
-batch    dialled  total   in db  created     name
-3018         223    307     660  2026-09-30  'Basti_1_Final'
-3031          83    100     186  2026-10-01  'Tmf_Basti_1oct'
-2992           1      1       0  2026-09-30  'purplec'   <-- NOT LOADED
-1852           0      1       0  2026-06-26  'Purple dot test'   never dialled
-```
-
-**dialled** is contacts actually called - judge a batch by that, not by its
-name.
-**in db** means if it is done. 
-
-**3. Load it.**
+It finds every batch, skips the calls it already has, and loads the rest.
+No batch id to look up, nothing to choose:
 
 ```
-docker run --rm --env-file .env purple-dots --batch 3031
+  2385         8 answered     16 in db   Purple Dots_Basti_Day1_19thA  load
+  2992         1 answered      1 in db   purplec                       load + test_flag
+  3018       223 answered    663 in db   Basti_1_Final                 load
+
+  883 already loaded, 3 new
 ```
 
-Then re-run `--batches` and check `in db` went up. 
+**answered** is how many people picked up - NOT how many were called. A
+batch reading 646 of 1098 had all 1098 dialled; 452 simply did not answer.
 
+**Run it as often as you like.** It compares call by call, so re-running is a
+no-op and `0 new` means there was nothing to do. It also means a batch
+loaded last week picks up any calls Raya has retried since - which is real,
+and is how three calls in batch 3018 were found a week late.
 
+**3. Inbound**
 
+Calls people made TO the bot are a separate run, because they belong to no
+batch:
+
+```
+docker run --rm --env-file .env purple-dots --inbound
+```
+
+### Or everything in one command
+
+```
+docker run --rm --env-file .env --entrypoint python purple-dots run_pipeline.py
+```
+
+Four stages: check, outbound, inbound, platform. A stage that cannot run
+says so and the rest carry on.
+
+---
+
+## Test batches
+
+Trial batches are loaded like any other but marked `test_flag = true`, so
+reporting ignores them. The list is one line in `.env`:
+
+```
+PD_TEST_BATCHES=1852,2042,2044,2100,2988,2991,2992
+```
+
+Set once. A new **campaign** needs no edit - it loads and counts straight
+away. Add an id here only when a batch turns out to be a trial.
+
+Marked rather than skipped deliberately: a wrong mark is one `UPDATE` to
+undo, while a wrongly skipped batch goes missing silently for months.

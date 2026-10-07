@@ -6,6 +6,9 @@
 *
 
 !load_purple.py
+!db.py
+!sync_s3.py
+!run_pipeline.py
 !raya_client.py
 !transform_purple.py
 !requirements.txt

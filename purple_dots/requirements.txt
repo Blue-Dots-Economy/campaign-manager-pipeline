@@ -1,2 +1,6 @@
 requests==2.34.2
 python-dotenv==1.2.3
+
+# Only needed when DATABASE_URL points at a local Postgres; the Supabase
+# path uses requests. Harmless to install either way.
+psycopg2-binary==2.9.13

@@ -1,8 +1,12 @@
 # Purple Dots loader: Raya calls -> Supabase.
 #
 #   docker build -t purple-dots .
-#   docker run --rm --env-file .env purple-dots --dry-run --batch 3031
-#   docker run --rm --env-file .env purple-dots --batch 3031
+#   docker run --rm --env-file .env purple-dots --check
+#   docker run --rm --env-file .env purple-dots --dry-run
+#   docker run --rm --env-file .env purple-dots
+#
+# Or everything - calls in and out, plus the platform dump - in one go:
+#   docker run --rm --env-file .env --entrypoint python purple-dots \n#       run_pipeline.py
 #
 # A batch job, not a service. It runs, writes to Supabase, and exits.
 #
@@ -36,6 +40,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Only the pipeline. The allow-list lives in .dockerignore.
 COPY load_purple.py raya_client.py transform_purple.py ./
+COPY db.py sync_s3.py run_pipeline.py ./
 COPY sql/ ./sql/
 
 # Only --csv writes here, and nothing does by default. The directory exists
@@ -57,7 +62,8 @@ HEALTHCHECK NONE
 
 ENTRYPOINT ["python", "load_purple.py"]
 
-# A bare `docker run` does nothing destructive. Scoping is deliberate: an
-# unscoped load puts back ~950 deleted test rows, so the default is the safe
-# one and --batch has to be asked for.
+# A bare `docker run` does nothing destructive. The loader reads only
+# batches, so the 933 batch-less test calls deleted on 30 Sept 2026 are now
+# unreachable rather than merely filtered - but a dry run is still the right
+# default for a container someone may start without reading anything.
 CMD ["--dry-run"]
