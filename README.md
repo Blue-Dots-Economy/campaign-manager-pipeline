@@ -1,18 +1,30 @@
-# campaign_manager_pipeline
+# campaign_manager_pipeline — Purple Dots on Postgres
 
 Voice bots call people. This reads those calls out of Raya and loads them
-into Supabase.
+into a local Postgres.
 
-| | programme | Supabase project |
+**To run it: [purple_dots/RUNNING.md](purple_dots/RUNNING.md)** — Docker for
+the database, one command for the pipeline.
+
+## This branch is Purple Dots only
+
+`main` carries both programmes and writes to Supabase:
+
+| | programme | where it writes |
 |---|---|---|
-| [`blue_dots/`](blue_dots/) | Kaam Ki Baat, Dhande Ki Baat, TRRAIN — jobs | `vqvonmoktpvfvzlhtiqo` |
-| [`purple_dots/`](purple_dots/) | Purple Dots — disability support | `blzzscjqvaqfwxzlqtfn` |
+| `blue_dots/` | Kaam Ki Baat, Dhande Ki Baat, TRRAIN — jobs | Supabase `vqvonmoktpvfvzlhtiqo` |
+| `purple_dots/` | Purple Dots — disability support | Supabase `blzzscjqvaqfwxzlqtfn` |
 
-Separate projects, separate Raya accounts, separate `.env` files. Neither
-folder imports from the other, so one can never write to the other's
-database.
+Here, `blue_dots/` is deleted and Purple Dots writes to Postgres instead.
+Blue Dots has no Postgres build and is not part of this work, so carrying a
+copy of it here would only mean two versions of it drifting apart.
 
-**Running Purple Dots:** [purple_dots/RUNNING.md](purple_dots/RUNNING.md) —
-Docker, three commands, no Python needed.
+Which is also why **this branch is not meant to be merged**. Merging would
+delete Blue Dots from `main`. See the pull request for the storage-layer
+diff.
 
-Each folder's README explains the rest.
+## Keeping the two in step
+
+Only `purple_dots/db.py` and the credentials differ between the branches.
+The loader, the transform, the Raya client and the batch classification are
+identical, so a fix to any of those belongs on both.
