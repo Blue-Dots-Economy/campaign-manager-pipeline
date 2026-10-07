@@ -23,16 +23,18 @@ import os
 
 from dotenv import load_dotenv
 
+# Before the imports below: raya_client and db read RAYA_BASE_URL and the
+# PD_* timeouts at import time, so .env must already be loaded.
+load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+
 # fetch_all_calls returns batch-less calls, so it is reachable ONLY from
 # the --inbound path, where batch-less is what an inbound call is. The
 # normal outbound run never calls it.
-from raya_client import (fetch_all_agents, fetch_all_batches,
+from raya_client import (fetch_all_agents, fetch_all_batches,  # noqa: E402
                          fetch_all_calls, fetch_all_contacts,
                          fetch_call_detail, fetch_calls, is_inbound)
-import db
-from transform_purple import make_connections, make_row
-
-load_dotenv()
+import db  # noqa: E402
+from transform_purple import make_connections, make_row  # noqa: E402
 
 TABLE = "purple_dots_calls"
 CONN_TABLE = "purple_dots_connections"
@@ -107,7 +109,7 @@ TEST_PHONES: set[str] = _env_set("PD_TEST_PHONES")
 
 def is_test_caller(call):
     """Inbound call from a team number. Digits only - Raya returns both
-    '8065295804' and '+918065295804'."""
+    '9000000000' and '+919000000000'."""
     known = TEST_PHONES
     if not known:
         return False
@@ -190,6 +192,11 @@ def check(api_key):
     print("Database")
     ok("backend", True, db.describe())
     if os.getenv("DATABASE_URL"):
+        try:
+            good, detail = db.expected_database()
+            ok("expected database", good, detail)
+        except Exception as exc:
+            ok("expected database", False, str(exc).strip().splitlines()[0][:60])
         for table in (TABLE, CONN_TABLE):
             try:
                 n = db.table_count(table)
@@ -431,6 +438,7 @@ def main():
     if args.agents:
         list_agents(api_key)
         return
+    db.assert_expected_database()
     if args.batches:
         list_batches(api_key)
         return

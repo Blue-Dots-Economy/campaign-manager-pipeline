@@ -9,7 +9,12 @@ them, and RLS with no policy blocks every INSERT from a non-owner.
 """
 import pathlib
 
-import db
+from dotenv import load_dotenv
+
+# Same .env as the loader. Loaded before `import db` reads PD_* settings.
+load_dotenv(pathlib.Path(__file__).resolve().parent / ".env")
+
+import db  # noqa: E402
 
 FILES = ["sql/create_purple_dots.sql", "sql/create_purple_dots_s3.sql"]
 
@@ -17,6 +22,7 @@ FILES = ["sql/create_purple_dots.sql", "sql/create_purple_dots_s3.sql"]
 def main():
     db.require_url()
     print(db.describe())
+    db.assert_expected_database()
 
     # sql/ grants to roles Supabase provides and plain Postgres does not.
     db.ensure_supabase_roles()

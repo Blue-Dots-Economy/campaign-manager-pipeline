@@ -91,7 +91,8 @@ def main():
 
     # Optional: its credentials are separate from Raya's and the database's.
     if "platform" not in args.skip:
-        missing = [n for n in ("BASE_URL", "KEYCLOAK_URL", "CLIENT_SECRET")
+        missing = [n for n in ("BASE_URL", "KEYCLOAK_URL", "REALM", "CLIENT_ID",
+                               "CLIENT_SECRET")
                    if not os.getenv(n)]
         if missing:
             print()

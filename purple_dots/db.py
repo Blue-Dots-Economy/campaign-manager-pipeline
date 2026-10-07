@@ -47,6 +47,31 @@ def connect():
         options=f"-c statement_timeout={STATEMENT_TIMEOUT_MS}")
 
 
+def expected_database():
+    """(ok, detail) for PD_EXPECTED_DATABASE against current_database().
+
+    The old Supabase build refused to write to the Blue Dots project. This
+    is the Postgres equivalent: a DATABASE_URL pasted from the wrong
+    environment names a different database, and the run stops before it
+    writes anything. Unset means no check (local use).
+    """
+    want = os.getenv("PD_EXPECTED_DATABASE")
+    if not want:
+        return True, "not checked (PD_EXPECTED_DATABASE unset)"
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("select current_database()")
+        have = cur.fetchone()[0]
+    if have != want:
+        return False, f"connected to {have!r}, PD_EXPECTED_DATABASE is {want!r}"
+    return True, have
+
+
+def assert_expected_database():
+    good, detail = expected_database()
+    if not good:
+        raise SystemExit(f"Wrong database: {detail}. Check DATABASE_URL.")
+
+
 @contextmanager
 def _conn():
     conn = connect()

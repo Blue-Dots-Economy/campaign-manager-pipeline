@@ -25,9 +25,10 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-import db
-
+# Before `import db`, which reads the PD_* timeouts at import time.
 load_dotenv(Path(__file__).resolve().parent / ".env")
+
+import db  # noqa: E402
 
 DUMP_PATH = "/v1/campaign/dump"
 EXPECTED_TABLES = ["user", "items", "item_actions"]
@@ -35,6 +36,9 @@ GZIP_MAGIC = b"\x1f\x8b"
 TORN_SNAPSHOT_TOLERANCE = timedelta(seconds=60)
 REQUEST_TIMEOUT = 30
 CHUNK = 500
+# Everything the platform stage needs. run_pipeline.py skips the stage when
+# any is unset, rather than failing the run.
+PLATFORM_SETTINGS = ("BASE_URL", "KEYCLOAK_URL", "REALM", "CLIENT_ID", "CLIENT_SECRET")
 
 
 class DumpError(RuntimeError):
@@ -45,17 +49,19 @@ def need(name, default=None):
     value = os.getenv(name, default)
     if not value:
         raise DumpError(f"{name} is not set. Copy .env.example to .env and "
-                        f"fill in BASE_URL, KEYCLOAK_URL and CLIENT_SECRET - "
+                        f"fill in {', '.join(PLATFORM_SETTINGS)} - "
                         f"the Purple Dots deployment's, not the Blue Dots one.")
     return value
 
 
 def get_token():
+    # No defaults for REALM / CLIENT_ID: the realm name differs per
+    # environment, and a guessed one fails as an unhelpful Keycloak 404.
     url = (f"{need('KEYCLOAK_URL').rstrip('/')}/realms/"
-           f"{os.getenv('REALM', 'bluedots')}/protocol/openid-connect/token")
+           f"{need('REALM')}/protocol/openid-connect/token")
     r = requests.post(url, timeout=REQUEST_TIMEOUT,
                       data={"grant_type": "client_credentials",
-                            "client_id": os.getenv("CLIENT_ID", "campaign-manager"),
+                            "client_id": need("CLIENT_ID"),
                             "client_secret": need("CLIENT_SECRET")})
     if r.status_code != 200:
         raise DumpError(f"token request failed: {r.status_code} {r.text[:300]}")
@@ -227,6 +233,8 @@ def main():
     writing = not (args.check or args.dry_run)
     if writing and not os.getenv("DATABASE_URL"):
         raise DumpError("DATABASE_URL must be set to write. See .env.example.")
+    if writing:
+        db.assert_expected_database()
 
     dump = get_dump(get_token())
     files = dump.get("files") or []

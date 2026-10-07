@@ -29,7 +29,8 @@ docker compose up -d
 
 Postgres on port **5433**, not 5432, so it cannot collide with another one
 already running - that collision is silent, and writes land in the wrong
-place. The data lives in a named volume, so `docker compose down` keeps it.
+place. If 5433 is taken as well, set `PD_DB_PORT` in `.env` and use the same
+port in `DATABASE_URL`. The data lives in a named volume, so `docker compose down` keeps it.
 `down -v` does not.
 
 **3. Create the tables, once:**
