@@ -204,21 +204,6 @@ def is_inbound(call: dict[str, Any]) -> bool:
     return bool(call.get("caller_no")) and not call.get("to_number")
 
 
-def transcript_text(raw: Any) -> str | None:
-    """The spoken conversation only. Tool calls and their payloads are
-    dropped - the tools here are reference lookups (Disabilitytypes,
-    DisabilitySchemes, ProvidersList) that carry no answer worth keeping."""
-    if not isinstance(raw, list):
-        return None
-    turns = []
-    for item in raw:
-        if isinstance(item, dict) and item.get("role") in ("user", "assistant"):
-            content = item.get("content")
-            if content:
-                turns.append(f"{item['role']}: {content}")
-    return "\n".join(turns) if turns else None
-
-
 def tools_used(raw: Any) -> list[str] | None:
     if not isinstance(raw, list):
         return None
