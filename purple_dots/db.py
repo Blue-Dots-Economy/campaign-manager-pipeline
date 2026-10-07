@@ -89,18 +89,44 @@ def column_values(table, column):
 
 
 def can_write(table):
-    """(ok, detail). Proves the connection can write WITHOUT writing.
+    """(ok, detail). Proves the connection can INSERT, then rolls it back.
 
-    A rolled-back update matching no rows. It reaches the permission check
-    and changes nothing, which is the point - the alternative is discovering
-    a read-only role after twenty minutes of fetching.
+    It has to be an insert. The first version ran an update matching no
+    rows, which passes for a user who cannot insert at all: an UPDATE whose
+    WHERE matches nothing touches no row, so no policy and no column
+    privilege is ever evaluated. Against a table with row level security
+    enabled, that probe reported "write permission ok" while every real
+    write failed with "new row violates row-level security policy". A
+    preflight that passes when the run will fail is worse than no preflight.
+
+    Nothing is left behind: the insert is rolled back, and the sentinel
+    call_id would be unique anyway.
     """
     try:
-        with _conn() as conn, conn.cursor() as cur:
-            cur.execute(f'update public."{table}" set "call_id" = "call_id" '
-                        f'where false')
+        if psycopg2 is None:
+            return False, "psycopg2 is not installed"
+        conn = psycopg2.connect(require_url())
+        try:
+            with conn.cursor() as cur:
+                # Fill every NOT NULL column that has no default. Asked of
+                # the catalogue rather than hardcoded: the schema gains
+                # columns, and a fixed list would start failing for the
+                # wrong reason.
+                cur.execute(
+                    "select column_name from information_schema.columns "
+                    "where table_schema = 'public' and table_name = %s "
+                    "  and is_nullable = 'NO' and column_default is null",
+                    (table,))
+                cols = [r[0] for r in cur.fetchall()] or ["call_id"]
+                names = ", ".join(f'"{c}"' for c in cols)
+                marks = ", ".join(["%s"] * len(cols))
+                cur.execute(
+                    f'insert into public."{table}" ({names}) values ({marks})',
+                    tuple("__preflight_probe__" for _ in cols))
             conn.rollback()
-        return True, ""
+            return True, ""
+        finally:
+            conn.close()
     except Exception as exc:
         return False, str(exc).strip().splitlines()[0][:80]
 
@@ -138,6 +164,23 @@ def upsert(table, rows, conflict, chunk=200):
             psycopg2.extras.execute_values(cur, sql, squared, page_size=chunk)
             done += len(squared)
     return done
+
+
+def disable_rls(table):
+    """Turn row level security off, if it is on. True when it changed.
+
+    Only the owner may do this, so it belongs in init_db.py rather than in
+    the loader's path - the loader runs as a least-privilege user and would
+    only fail.
+    """
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("select relrowsecurity from pg_class where relname = %s",
+                    (table,))
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return False
+        cur.execute(f'alter table public."{table}" disable row level security')
+        return True
 
 
 def ensure_supabase_roles():

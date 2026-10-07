@@ -7,7 +7,6 @@
 The .sql files in sql/ are the only description of the schema; this applies
 them. Re-runnable - every statement is CREATE ... IF NOT EXISTS.
 """
-import os
 import pathlib
 
 import db
@@ -25,6 +24,14 @@ def main():
     # as the one description of the schema.
     db.ensure_supabase_roles()
     print("  ok    supabase roles (service_role, anon, authenticated)")
+
+    # Tables created before 7 Oct 2026 carry row level security with no
+    # policy, which blocks every INSERT from anyone but the owner. The .sql
+    # files no longer enable it, but CREATE TABLE IF NOT EXISTS will not
+    # revisit a table that already exists, so it is turned off here.
+    for table in ("purple_dots_calls", "purple_dots_connections"):
+        if db.disable_rls(table):
+            print(f"  ok    row level security off on {table}")
 
     here = pathlib.Path(__file__).resolve().parent
     for name in FILES:

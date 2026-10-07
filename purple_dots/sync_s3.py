@@ -71,7 +71,7 @@ def need(name, default=None):
 
 def get_token():
     url = (f"{need('KEYCLOAK_URL').rstrip('/')}/realms/"
-           f"{os.getenv('REALM', 'campaign')}/protocol/openid-connect/token")
+           f"{os.getenv('REALM', 'bluedots')}/protocol/openid-connect/token")
     r = requests.post(url, timeout=REQUEST_TIMEOUT,
                       data={"grant_type": "client_credentials",
                             "client_id": os.getenv("CLIENT_ID", "campaign-manager"),

@@ -30,12 +30,11 @@ others, which is the difference between four API calls and forty.
 import argparse
 import collections
 import csv
+import datetime
 import io
 import json
 import os
-import sys
 
-import requests
 from dotenv import load_dotenv
 
 # fetch_all_calls returns batch-less calls, so it is reachable ONLY from
@@ -61,6 +60,30 @@ OUT_DIR = "data"
 # None of these has a batch, and Basti Launch Agent emits no call_output at
 # all, so this list almost certainly does NOT cover Purple Dots production.
 # See README - resolving that needs the right Raya key, not more code.
+def _env_set(name, default=""):
+    """A comma or space separated list from the environment, or the default.
+
+    Values that differ per deployment - which bots, which numbers - read from
+    here so a second environment needs a different .env rather than a
+    different build.
+    """
+    raw = os.getenv(name) or default
+    return {x.strip() for x in raw.replace(",", " ").split() if x.strip()}
+
+
+def _env_map(name, default):
+    """id:label pairs from the environment, or the default dict."""
+    raw = os.getenv(name)
+    if not raw:
+        return dict(default)
+    out = {}
+    for part in raw.replace(",", " ").split():
+        agent_id, _, label = part.partition(":")
+        if agent_id.strip():
+            out[agent_id.strip()] = label.strip() or agent_id.strip()
+    return out
+
+
 AGENTS = {
     # The live bots.
     #
@@ -101,9 +124,9 @@ EXCLUDED = {
 #
 # Two numbers are involved, which is the thing to check if this ever looks
 # wrong: 918044484499 reaches the testing bot, 917946350861 reaches this one.
-INBOUND_AGENTS = {
+INBOUND_AGENTS = _env_map("PD_INBOUND_AGENTS", {
     "a1567240-052e-4ec0-be49-be2ca2d58ea6": "Purple-Dots-Inbound-061020261110",
-}
+})
 
 # Numbers the team rang the inbound bots from while testing. Their calls are
 # real in Raya and must not count as beneficiary traffic, so their rows are
@@ -118,7 +141,7 @@ INBOUND_AGENTS = {
 #
 # Extend with PD_TEST_PHONES in .env rather than editing this; the set below
 # is the floor, not the whole list.
-TEST_PHONES: set[str] = {"8065295804"}
+TEST_PHONES: set[str] = _env_set("PD_TEST_PHONES", "8065295804")
 
 
 def is_test_caller(call):
@@ -128,9 +151,7 @@ def is_test_caller(call):
     from one bot and '+918065295804' from another, and a string compare
     would quietly flag neither.
     """
-    known = TEST_PHONES | {x.strip() for x in
-                           os.getenv("PD_TEST_PHONES", "").replace(",", " ").split()
-                           if x.strip()}
+    known = TEST_PHONES
     if not known:
         return False
     digits = "".join(ch for ch in str(call.get("caller_no") or "")
@@ -476,6 +497,12 @@ def main():
                          "calls the bots made out. These belong to no batch, "
                          "so it is a separate run - never mixed into one.")
     ap.add_argument("--limit", type=int, help="stop after N calls (smoke test)")
+    ap.add_argument("--refresh-days", type=int, default=0, metavar="N",
+                    help="also re-fetch calls from the last N days that are "
+                         "already stored. A call captured while it was still "
+                         "running keeps whatever call_output existed at that "
+                         "moment, and the per-call skip means it is never "
+                         "looked at again; this is how it gets corrected.")
     ap.add_argument("--csv", action="store_true",
                     help="also write the rows to data/ for inspection. Off by "
                          "default: the pipeline's job is to land data in "
@@ -530,7 +557,11 @@ def main():
             found.extend(inbound)
         print(f"  {len(found)} inbound calls")
         if not found:
-            raise SystemExit("no inbound calls found for those agents.")
+            # Not an error. A day on which nobody rang the bot is a normal
+            # day, and a scheduled run that exits non-zero for it would page
+            # somebody every quiet night until they stopped believing it.
+            print("  nobody called in - nothing to do.")
+            return 0
     else:
         found, contacts = batch_walk(args, api_key)
     if not found:
@@ -546,6 +577,19 @@ def main():
     seen = existing_ids()
     fresh = [c for c in found if str(c.get("uuid")) not in seen]
     print(f"  {len(found) - len(fresh)} already loaded, {len(fresh)} new")
+
+    if args.refresh_days:
+        # Upsert makes re-fetching harmless: the row is overwritten with
+        # whatever Raya says now, which is the point.
+        cutoff = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(days=args.refresh_days)).isoformat()
+        again = [c for c in found
+                 if str(c.get("uuid")) in seen
+                 and str(c.get("call_start_time") or "") >= cutoff]
+        if again:
+            print(f"  --refresh-days {args.refresh_days}: re-fetching "
+                  f"{len(again)} stored call(s)")
+            fresh = again + fresh
     if args.limit:
         fresh = fresh[:args.limit]
         print(f"  --limit: keeping {len(fresh)}")
