@@ -221,7 +221,7 @@ SPECS = (
 def push(table, conflict, rows):
     """Upsert a chunk. db.upsert collapses the dump's duplicate keys, which
     Postgres rejects within one statement (21000)."""
-    return db.upsert(table, rows, conflict, chunk=CHUNK)
+    return db.upsert(table, rows, conflict, chunk=CHUNK, schema=db.PLATFORM_SCHEMA)
 
 
 def main():

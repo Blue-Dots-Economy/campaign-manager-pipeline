@@ -1,6 +1,6 @@
 # Purple Dots pipeline
 
-Raya voice-bot calls -> Supabase. Disability support, not jobs: beneficiaries,
+Raya voice-bot calls -> Postgres. Disability support, not jobs: beneficiaries,
 disability types, solution enablers and support centres. No seeker, no
 employer, no job.
 
@@ -20,6 +20,18 @@ employer, no job.
 Two sources, two scripts, no overlap. `load_purple.py` records what happened
 on the phone; `sync_s3.py` records what exists on the platform. They meet
 only through `profile_item_id`.
+
+## Where the tables live
+
+One database, `campaign-manager-purpledots`, shared with the dashboard
+(agg-campaign-manager-v2):
+
+    public     owned by the dashboard's migrations; this pipeline writes
+               purple_dots_calls and purple_dots_connections as purple_loader
+    platform   owned by this pipeline: purple_users, purple_items, purple_actions
+
+`init_db.py` detects which it is on: on the shared database it sets up only
+`platform`; on the local compose database it creates everything.
 
 ## Separate from Blue Dots on purpose
 

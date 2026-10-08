@@ -85,10 +85,13 @@ def _conn():
         conn.close()
 
 
+# The pipeline's schema on the shared database.
+PLATFORM_SCHEMA = "platform"
+
 _JSON_COLUMNS = {}
 
 
-def json_columns(cur, table):
+def json_columns(cur, table, schema="public"):
     """Which columns are json/jsonb. Cached per table.
 
     Needed because a Python list means two different things here:
@@ -98,23 +101,30 @@ def json_columns(cur, table):
     gave 'malformed array literal: "[\"Low Vision\"]"' on every call that
     used a tool - which is nearly all of them.
     """
-    if table not in _JSON_COLUMNS:
+    if (schema, table) not in _JSON_COLUMNS:
         cur.execute(
             "select column_name from information_schema.columns "
-            "where table_schema = 'public' and table_name = %s "
-            "  and data_type in ('json', 'jsonb')", (table,))
-        _JSON_COLUMNS[table] = {r[0] for r in cur.fetchall()}
-    return _JSON_COLUMNS[table]
+            "where table_schema = %s and table_name = %s "
+            "  and data_type in ('json', 'jsonb')", (schema, table))
+        _JSON_COLUMNS[schema, table] = {r[0] for r in cur.fetchall()}
+    return _JSON_COLUMNS[schema, table]
 
 
-def table_count(table):
+def table_count(table, schema="public"):
     """Rows in the table, or None if it does not exist."""
     with _conn() as conn, conn.cursor() as cur:
-        cur.execute("select to_regclass(%s)", (f"public.{table}",))
+        cur.execute("select to_regclass(%s)", (f"{schema}.{table}",))
         if cur.fetchone()[0] is None:
             return None
-        cur.execute(pgsql.SQL("select count(*) from public.{}").format(
-            pgsql.Identifier(table)))
+        cur.execute(pgsql.SQL("select count(*) from {}.{}").format(
+            pgsql.Identifier(schema), pgsql.Identifier(table)))
+        return cur.fetchone()[0]
+
+
+def can_create_in_public():
+    """False on the shared database, where the dashboard owns public."""
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute("select has_schema_privilege('public', 'CREATE')")
         return cur.fetchone()[0]
 
 
@@ -158,7 +168,7 @@ def can_write(table):
         return False, str(exc).strip().splitlines()[0][:80]
 
 
-def upsert(table, rows, conflict, chunk=200, preserve=()):
+def upsert(table, rows, conflict, chunk=200, preserve=(), schema="public"):
     """Insert rows, updating on conflict. Returns how many were sent.
 
     `conflict` is a comma-separated key list. `preserve` names columns that
@@ -171,7 +181,7 @@ def upsert(table, rows, conflict, chunk=200, preserve=()):
     cols = conflict.split(",")
     done = 0
     with _conn() as conn, conn.cursor() as cur:
-        jsonb = json_columns(cur, table)
+        jsonb = json_columns(cur, table, schema)
         for start in range(0, len(rows), chunk):
             batch = rows[start:start + chunk]
             # Every row in one statement must carry the same columns, and a
@@ -193,9 +203,9 @@ def upsert(table, rows, conflict, chunk=200, preserve=()):
                 pgsql.Identifier(k))
                 for k in keys if k not in cols and k not in preserve]
             statement = pgsql.SQL(
-                "insert into public.{tbl} ({cols}) values %s "
+                "insert into {tbl} ({cols}) values %s "
                 "on conflict ({keys}) {action}").format(
-                    tbl=pgsql.Identifier(table),
+                    tbl=pgsql.Identifier(schema, table),
                     cols=pgsql.SQL(", ").join(map(pgsql.Identifier, keys)),
                     keys=pgsql.SQL(", ").join(map(pgsql.Identifier, cols)),
                     action=(pgsql.SQL("do update set ")

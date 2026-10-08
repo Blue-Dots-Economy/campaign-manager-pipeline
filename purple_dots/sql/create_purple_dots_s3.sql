@@ -16,10 +16,29 @@
 -- them - and a column per key means a migration every time the platform
 -- adds a field.
 
+-- On the shared database the dashboard's bootstrap creates this schema.
+do $$
+begin
+    if not exists (select 1 from pg_namespace where nspname = 'platform') then
+        create schema platform;
+    end if;
+end $$;
+
+-- Move tables created in public before this schema existed.
+do $$
+declare t text;
+begin
+    foreach t in array array['purple_users', 'purple_items', 'purple_actions'] loop
+        if to_regclass('public.' || t) is not null and to_regclass('platform.' || t) is null then
+            execute format('alter table public.%I set schema platform', t);
+        end if;
+    end loop;
+end $$;
+
 -- Matches the dump as it actually arrives. There is no user_state here -
 -- the Blue Dots dump has one, Purple Dots does not - so no age or gender
 -- field exists to mask.
-create table if not exists public.purple_users (
+create table if not exists platform.purple_users (
     instance             text        not null,
     user_id              text        not null,   -- "id" in the dump
     created_at           timestamptz,
@@ -34,7 +53,7 @@ create table if not exists public.purple_users (
     primary key (instance, user_id)
 );
 
-create table if not exists public.purple_items (
+create table if not exists platform.purple_items (
     instance          text        not null,
     item_id           text        not null,
     item_network      text,
@@ -51,7 +70,7 @@ create table if not exists public.purple_items (
     primary key (instance, item_id)
 );
 
-create table if not exists public.purple_actions (
+create table if not exists platform.purple_actions (
     instance             text        not null,
     action_id            text        not null,
     partition_network    text,
@@ -79,7 +98,7 @@ create table if not exists public.purple_actions (
 -- item_id, action_state). The export's item_actions allowlist uses the
 -- source/target tuple above instead, so bring an existing table into line.
 -- Safe: no action row has ever loaded - the dump carried no action_id.
-alter table public.purple_actions
+alter table platform.purple_actions
     add column if not exists update_count         integer,
     add column if not exists source_item_network  text,
     add column if not exists source_item_domain   text,
@@ -102,10 +121,10 @@ alter table public.purple_actions
 -- checks the references itself and reports them instead.
 
 create index if not exists purple_items_domain_idx
-    on public.purple_items (item_domain, lifecycle_status);
-drop index if exists public.purple_actions_item_idx;
-drop index if exists public.purple_actions_actor_idx;
+    on platform.purple_items (item_domain, lifecycle_status);
+drop index if exists platform.purple_actions_item_idx;
+drop index if exists platform.purple_actions_actor_idx;
 create index if not exists purple_actions_source_idx
-    on public.purple_actions (instance, source_item_id);
+    on platform.purple_actions (instance, source_item_id);
 create index if not exists purple_actions_target_idx
-    on public.purple_actions (instance, target_item_id);
+    on platform.purple_actions (instance, target_item_id);
