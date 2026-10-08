@@ -16,7 +16,17 @@ load_dotenv(pathlib.Path(__file__).resolve().parent / ".env")
 
 import db  # noqa: E402
 
-FILES = ["sql/create_purple_dots.sql", "sql/create_purple_dots_s3.sql"]
+# Order matters: the dashboard views read purple_dots_calls.
+FILES = ["sql/create_purple_dots.sql", "sql/create_purple_dots_s3.sql",
+         "sql/create_dashboard.sql"]
+
+DASHBOARD_TABLES = (
+    "app_users", "campaign_requests", "launched_batch_inputs",
+    "launched_batches", "north_star_config", "program_agents",
+    "program_export_targets", "program_sync_state", "reviewers",
+    "sheet_connections", "transcript_reviews",
+    "call_rows", "call_rows_np", "kkb_grid",
+)
 
 
 def main():
@@ -27,7 +37,6 @@ def main():
     # sql/ grants to roles Supabase provides and plain Postgres does not.
     db.ensure_supabase_roles()
     print("  ok    supabase roles (service_role, anon, authenticated)")
-
 
     for table in ("purple_dots_calls", "purple_dots_connections"):
         if db.disable_rls(table):
@@ -43,7 +52,8 @@ def main():
         print(f"  ok    {name}")
     print()
     for table in ("purple_dots_calls", "purple_dots_connections",
-                  "purple_users", "purple_items", "purple_actions"):
+                  "purple_users", "purple_items", "purple_actions",
+                  *DASHBOARD_TABLES):
         count = db.table_count(table)
         print(f"  {table:<26}{'missing' if count is None else f'{count} rows'}")
 
