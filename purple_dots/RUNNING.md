@@ -39,7 +39,6 @@ port in `DATABASE_URL`. The data lives in a named volume, so `docker compose dow
 python init_db.py
 ```
 
-This creates the pipeline tables and the dashboard schema: 11 tables, 3 views and 30 functions, with no data.
 Re-runnable, and it prints every table with its row count. It also creates
 the `service_role`, `anon` and `authenticated` roles the schema grants to -
 Supabase provided those and a bare Postgres does not.
