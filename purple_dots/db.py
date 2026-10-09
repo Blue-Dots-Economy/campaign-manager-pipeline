@@ -121,10 +121,11 @@ def table_count(table, schema="public"):
         return cur.fetchone()[0]
 
 
-def can_create_in_public():
-    """False on the shared database, where the dashboard owns public."""
+def is_shared_database():
+    """True on the dashboard's database (has schema drizzle or extensions)."""
     with _conn() as conn, conn.cursor() as cur:
-        cur.execute("select has_schema_privilege('public', 'CREATE')")
+        cur.execute("select exists (select 1 from pg_namespace "
+                    "where nspname in ('drizzle', 'extensions'))")
         return cur.fetchone()[0]
 
 

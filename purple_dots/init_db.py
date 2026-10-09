@@ -29,8 +29,7 @@ def main():
     print(db.describe())
     db.assert_expected_database()
 
-    owns_public = db.can_create_in_public()
-    if owns_public:
+    if not db.is_shared_database():
         db.ensure_supabase_roles()
         print("  ok    supabase roles (service_role, anon, authenticated)")
         # RLS with no policy blocks non-owner INSERTs on pre-7-Oct tables.

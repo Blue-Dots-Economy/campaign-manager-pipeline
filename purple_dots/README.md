@@ -23,15 +23,12 @@ only through `profile_item_id`.
 
 ## Where the tables live
 
-One database, `campaign-manager-purpledots`, shared with the dashboard
-(agg-campaign-manager-v2):
+One database, `campaign-manager-purpledots`, and one login, `campaign_manager`.
 
-    public     owned by the dashboard's migrations; this pipeline writes
-               purple_dots_calls and purple_dots_connections as purple_loader
-    platform   owned by this pipeline: purple_users, purple_items, purple_actions
+    public     dashboard migrations; we write purple_dots_calls, purple_dots_connections
+    platform   ours: purple_users, purple_items, purple_actions
 
-`init_db.py` detects which it is on: on the shared database it sets up only
-`platform`; on the local compose database it creates everything.
+`init_db.py` creates `public` tables only on a local database.
 
 ## Separate from Blue Dots on purpose
 
