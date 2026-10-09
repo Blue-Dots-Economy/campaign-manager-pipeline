@@ -1,6 +1,6 @@
 # Purple Dots pipeline
 
-Raya voice-bot calls -> Supabase. Disability support, not jobs: beneficiaries,
+Raya voice-bot calls -> Postgres. Disability support, not jobs: beneficiaries,
 disability types, solution enablers and support centres. No seeker, no
 employer, no job.
 
@@ -12,12 +12,23 @@ employer, no job.
     transform_purple.py         one Raya call -> one purple_dots_calls row
     raya_client.py              Raya API, standalone copy
     db.py                       every read and write to the database
+    init_db.py                  creates the tables from sql/
+    docker-compose.yml          the Postgres this writes to
     sql/                        the tables
     Dockerfile, .dockerignore   the container
 
 Two sources, two scripts, no overlap. `load_purple.py` records what happened
 on the phone; `sync_s3.py` records what exists on the platform. They meet
 only through `profile_item_id`.
+
+## Where the tables live
+
+One database, `campaign-manager-purpledots`, and one login, `campaign_manager`.
+
+    public     dashboard migrations; we write purple_dots_calls, purple_dots_connections
+    platform   ours: purple_users, purple_items, purple_actions
+
+`init_db.py` creates `public` tables only on a local database.
 
 ## Separate from Blue Dots on purpose
 

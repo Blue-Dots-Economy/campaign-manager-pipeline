@@ -103,12 +103,23 @@ create index if not exists purple_dots_calls_date_idx
 create index if not exists purple_dots_calls_agent_idx
     on public.purple_dots_calls (agent_id);
 
--- RLS on from the start. Even without names, a disability category tied to a
--- platform id is sensitive. service_role bypasses RLS and is what the loader
--- uses; no policy is granted to anon or authenticated, so neither can read a
--- row until somebody deliberately adds one.
-alter table public.purple_dots_calls enable row level security;
-
+-- NO ROW LEVEL SECURITY, deliberately, and this is a correction.
+--
+-- These tables used to carry `enable row level security` with no policy
+-- attached. On Supabase that was invisible: service_role bypasses RLS, so
+-- the loader wrote happily and nothing ever failed. On plain Postgres it
+-- blocks every INSERT from any user who does not own the table - "new row
+-- violates row-level security policy" - no matter what grants they hold.
+-- Locally it still worked only because docker-compose connects as the
+-- table's owner, which is exactly the configuration a cluster will not use.
+--
+-- RLS with no policy is not a safety feature; it is a table nothing can
+-- write to. If per-row rules are wanted later they need actual policies,
+-- added deliberately, and tested as the role the loader runs as - not as
+-- the owner.
+--
+-- Access is controlled by grants instead. service_role is kept for the
+-- Supabase branch, where it is the role the service key assumes.
 grant select, insert, update on public.purple_dots_calls to service_role;
 
 
@@ -147,6 +158,9 @@ create index if not exists purple_dots_connections_provider_idx
 create index if not exists purple_dots_connections_seeker_idx
     on public.purple_dots_connections (seeker_item_id);
 
-alter table public.purple_dots_connections enable row level security;
-
+-- No RLS here either; see the note on purple_dots_calls above.
 grant select, insert, update on public.purple_dots_connections to service_role;
+-- The sequence too: id is bigserial, and a table grant alone gives
+-- "permission denied for sequence purple_dots_connections_id_seq" on insert.
+grant usage, select on sequence public.purple_dots_connections_id_seq
+    to service_role;

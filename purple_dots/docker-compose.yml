@@ -1,0 +1,39 @@
+# Local Postgres for the Purple Dots pipeline.
+#
+#   docker compose up -d        reads POSTGRES_PASSWORD from .env
+#   python init_db.py
+#
+# The password is not in this file: compose reads it from .env, the same
+# file DATABASE_URL lives in, so the two cannot disagree.
+#
+# Port 5433, not 5432: a machine that already runs Postgres - or Supabase's
+# own local stack - holds 5432, and the collision is silent until a write
+# lands in the wrong database.
+#
+# The volume matters now. This stopped being a sandbox the moment Purple
+# Dots left Supabase - it is the only copy of the call data, and without a
+# named volume `docker compose down` would delete it. `down -v` still does,
+# which is the one command to be careful with.
+#
+# Not that the data is irreplaceable: Raya still has every call, so a lost
+# database is a re-run of run_pipeline.py rather than a loss. It is the hours
+# of re-fetching that the volume saves.
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-purple}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-campaign-manager-purpledots}
+    ports:
+      - "${PD_DB_PORT:-5433}:5432"
+    volumes:
+      - purple_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-purple} -d $${POSTGRES_DB:-campaign-manager-purpledots}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  purple_pgdata:

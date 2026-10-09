@@ -1,41 +1,22 @@
-"""Stream the Purple Dots platform dump from S3 into Supabase. No files.
+"""Stream the Purple Dots platform dump from S3 into Postgres. No files.
 
-    python sync_s3.py --check            # auth, snapshot metadata, nothing else
-    python sync_s3.py --dry-run          # stream and count, write nothing
-    python sync_s3.py                    # stream and upsert
+    python sync_s3.py --check      auth and snapshot metadata
+    python sync_s3.py --dry-run    stream and count, write nothing
+    python sync_s3.py              stream and upsert
 
 Run sql/create_purple_dots_s3.sql once first.
 
-NOTHING IS WRITTEN TO DISK
-The three .jsonl files are read straight off the pre-signed URL, a line at a
-time, and pushed to Supabase in chunks as they arrive. A full dump never
-exists locally, so there is nothing to forget to delete and nothing to leak
-from a laptop. Memory stays flat regardless of dump size - only the id sets
-used for reference checking are held, not the rows.
-
-WHAT THIS IS, AND WHAT IT IS NOT
-load_purple.py loads CALLS - what happened on the phone. This loads the
-PLATFORM: the people registered, the items created, and the actions taken on
-them. They meet only through profile_item_id.
-
-THE DUMP IS NON-PII BY DESIGN
-The exporter masks before it writes: age arrives as '2***', gender as
-'D***'. Nothing here recovers them - they never left the platform.
-
-TWO STEPS TO GET IN
+Two steps, neither using AWS credentials:
   1. POST {KEYCLOAK_URL}/realms/{REALM}/protocol/openid-connect/token
-     grant_type=client_credentials  ->  a short-lived access_token
-  2. GET  {BASE_URL}/v1/campaign/dump  with that token
-     ->  three pre-signed S3 URLs, fetched WITHOUT an auth header
+     grant_type=client_credentials. Must be a SYSTEM token; a user token
+     gets 403 NOT_SYSTEM_CLIENT.
+  2. GET {BASE_URL}/v1/campaign/dump -> three pre-signed S3 URLs, fetched
+     WITHOUT an auth header.
 
-The token must be a SYSTEM token. A coordinator or user token is rejected
-with 403 NOT_SYSTEM_CLIENT, and that is the usual first failure.
-
-CREDENTIALS ARE NOT SET YET. See .env.example.
+Rows carry no names: the exporter masks age as '2***' and gender as 'D***'.
 """
 import argparse
-import gzip
-import io
+import zlib
 import json
 import os
 from datetime import datetime, timedelta
@@ -44,9 +25,10 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv
 
-import db
-
+# Before `import db`, which reads the PD_* timeouts at import time.
 load_dotenv(Path(__file__).resolve().parent / ".env")
+
+import db  # noqa: E402
 
 DUMP_PATH = "/v1/campaign/dump"
 EXPECTED_TABLES = ["user", "items", "item_actions"]
@@ -54,6 +36,9 @@ GZIP_MAGIC = b"\x1f\x8b"
 TORN_SNAPSHOT_TOLERANCE = timedelta(seconds=60)
 REQUEST_TIMEOUT = 30
 CHUNK = 500
+# Everything the platform stage needs. run_pipeline.py skips the stage when
+# any is unset, rather than failing the run.
+PLATFORM_SETTINGS = ("BASE_URL", "KEYCLOAK_URL", "REALM", "CLIENT_ID", "CLIENT_SECRET")
 
 
 class DumpError(RuntimeError):
@@ -64,17 +49,19 @@ def need(name, default=None):
     value = os.getenv(name, default)
     if not value:
         raise DumpError(f"{name} is not set. Copy .env.example to .env and "
-                        f"fill in BASE_URL, KEYCLOAK_URL and CLIENT_SECRET - "
+                        f"fill in {', '.join(PLATFORM_SETTINGS)} - "
                         f"the Purple Dots deployment's, not the Blue Dots one.")
     return value
 
 
 def get_token():
+    # No defaults for REALM / CLIENT_ID: the realm name differs per
+    # environment, and a guessed one fails as an unhelpful Keycloak 404.
     url = (f"{need('KEYCLOAK_URL').rstrip('/')}/realms/"
-           f"{os.getenv('REALM', 'campaign')}/protocol/openid-connect/token")
+           f"{need('REALM')}/protocol/openid-connect/token")
     r = requests.post(url, timeout=REQUEST_TIMEOUT,
                       data={"grant_type": "client_credentials",
-                            "client_id": os.getenv("CLIENT_ID", "campaign-manager"),
+                            "client_id": need("CLIENT_ID"),
                             "client_secret": need("CLIENT_SECRET")})
     if r.status_code != 200:
         raise DumpError(f"token request failed: {r.status_code} {r.text[:300]}")
@@ -121,43 +108,60 @@ def check_snapshot(files, allow_torn):
 
 
 def stream_records(url):
-    """Yield one parsed object per line, straight off the wire.
+    """One parsed object per line, off the wire.
 
-    Pre-signed, so NO Authorization header - adding one makes S3 refuse.
-    The files are gzip but named .jsonl, so the magic bytes are sniffed
-    rather than trusted; peek() leaves them in the buffer for the reader
-    that follows.
+    Pre-signed, so no Authorization header - adding one makes S3 refuse.
+    Files are gzip but named .jsonl, so the magic bytes are sniffed.
     """
     with requests.get(url, stream=True, timeout=REQUEST_TIMEOUT) as resp:
         if resp.status_code != 200:
             raise DumpError(f"download failed: {resp.status_code} "
                             f"{resp.text[:200]}")
-        resp.raw.decode_content = True
-        buffered = io.BufferedReader(resp.raw)
-        if buffered.peek(2)[:2] == GZIP_MAGIC:
-            buffered = gzip.GzipFile(fileobj=buffered)
-        for n, line in enumerate(io.TextIOWrapper(buffered, encoding="utf-8"),
-                                 start=1):
-            line = line.strip()
-            if not line:
+        # Decompress from iter_content rather than wrapping resp.raw:
+        # urllib3 releases the connection at the end of the body, and
+        # GzipFile reading its trailer from the closed socket raises
+        # "read of closed file" on the last chunk.
+        unzip, tail, n = None, b"", 0
+        for chunk in resp.iter_content(64 * 1024):
+            if not chunk:
                 continue
+            if unzip is None:
+                unzip = (zlib.decompressobj(31)
+                         if chunk[:2] == GZIP_MAGIC else False)
+            if unzip is not False:
+                chunk = unzip.decompress(chunk)
+            tail += chunk
+            while b"\n" in tail:
+                line, _, tail = tail.partition(b"\n")
+                n += 1
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except json.JSONDecodeError as exc:
+                    print(f"    WARNING: line {n}: {exc}")
+        if unzip not in (None, False):
+            tail += unzip.flush()
+        if tail.strip():
             try:
-                yield json.loads(line)
+                yield json.loads(tail)
             except json.JSONDecodeError as exc:
-                print(f"    WARNING: line {n}: {exc}")
+                print(f"    WARNING: last line: {exc}")
 
 
 def user_row(r, instance):
+    # The key is "id", not "user_id" - the Blue Dots dump's spelling, which
+    # this was written against before a Purple Dots record existed. There is
+    # also no user_state, user_network or lifecycle_status here.
     return {
-        "instance": instance, "user_id": r["user_id"],
-        "user_network": r.get("user_network"),
-        "lifecycle_status": r.get("lifecycle_status"),
+        "instance": instance, "user_id": r["id"],
         "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
+        "domains": r.get("domains") or [],
         "onboarded_by_org_id": r.get("onboarded_by_org_id"),
         "onboarded_via": r.get("onboarded_via"),
+        "onboarded_source_id": r.get("onboarded_source_id"),
         "onboarded_at": r.get("onboarded_at"),
-        # Masked at source: '2***' for age, 'D***' for gender.
-        "user_state": r.get("user_state") or {},
         "tags": r.get("tags") or {},
     }
 
@@ -173,26 +177,40 @@ def item_row(r, instance):
         "lifecycle_status": r.get("lifecycle_status"),
         "created_by": r.get("created_by"), "lat": lat, "lng": lng,
         "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
-        # Kept whole: the item schema is not settled, and a column per key
-        # means a migration every time the platform adds a field.
+        # Kept whole: a column per key means a migration per new field.
         "item_state": r.get("item_state") or {},
     }
 
 
+# The export's item_actions allowlist (signals-s3-export manifests). Copied
+# field for field: a name that is not in the dump just loads as null.
+ACTION_FIELDS = (
+    "partition_network", "action_type", "action_status", "update_count",
+    "source_item_network", "source_item_domain", "source_item_type",
+    "source_item_id", "source_item_owner",
+    "target_item_network", "target_item_domain", "target_item_type",
+    "target_item_id", "target_item_owner",
+    "performed_by_org_id", "created_at", "updated_at",
+)
+
+
 def action_row(r, instance):
-    return {
-        "instance": instance, "action_id": r["action_id"],
-        "partition_network": r.get("partition_network"),
-        "action_type": r.get("action_type"),
-        "action_status": r.get("action_status"),
-        "actor_user_id": r.get("actor_user_id"), "item_id": r.get("item_id"),
-        "created_at": r.get("created_at"), "updated_at": r.get("updated_at"),
-        "action_state": r.get("action_state") or {},
-    }
+    """None when the record has no action_id.
+
+    The purple_dot export allowlist carried only partition_network,
+    created_at and updated_at until its item_actions columns were added, so
+    every action arrived with no id. Those are counted and skipped rather
+    than given a synthetic key, which would make an exporter problem look
+    like data.
+    """
+    if not r.get("action_id"):
+        return None
+    row = {"instance": instance, "action_id": r["action_id"]}
+    row.update({f: r.get(f) for f in ACTION_FIELDS})
+    return row
 
 
-# Order matters: users and items are streamed first so that the id sets are
-# populated before item_actions is checked against them.
+# Users and items first: their ids are needed to check item_actions.
 SPECS = (
     ("user",         "purple_users",   "instance,user_id",   user_row, "user_id"),
     ("items",        "purple_items",   "instance,item_id",   item_row, "item_id"),
@@ -201,10 +219,9 @@ SPECS = (
 
 
 def push(table, conflict, rows):
-    """Upsert a chunk. db.upsert collapses duplicate keys for us - Postgres
-    rejects a statement that updates a row it just inserted (21000), and the
-    dump does contain repeats."""
-    return db.upsert(table, rows, conflict, chunk=CHUNK)
+    """Upsert a chunk. db.upsert collapses the dump's duplicate keys, which
+    Postgres rejects within one statement (21000)."""
+    return db.upsert(table, rows, conflict, chunk=CHUNK, schema=db.PLATFORM_SCHEMA)
 
 
 def main():
@@ -220,8 +237,10 @@ def main():
     args = ap.parse_args()
 
     writing = not (args.check or args.dry_run)
+    if writing and not os.getenv("DATABASE_URL"):
+        raise DumpError("DATABASE_URL must be set to write. See .env.example.")
     if writing:
-        db.credentials()        # refuses the Blue Dots project, and a missing key
+        db.assert_expected_database()
 
     dump = get_dump(get_token())
     files = dump.get("files") or []
@@ -245,13 +264,17 @@ def main():
 
     for stem, table, conflict, build, id_field in SPECS:
         total, batch = 0, []
+        skipped = 0
         for record in stream_records(by_table[stem]):
             row = build(record, args.instance)
+            if row is None:
+                skipped += 1
+                continue
             if id_field in ids:
                 ids[id_field].add(row[id_field])
-            elif row.get("item_id") and row["item_id"] not in ids["item_id"]:
-                # A torn snapshot shows up here: an action whose item never
-                # arrived. Counted, not dropped - the row is still a fact.
+            elif any(row.get(k) and row[k] not in ids["item_id"]
+                     for k in ("source_item_id", "target_item_id")):
+                # Torn snapshot: an action whose item never arrived.
                 dangling += 1
             batch.append(row)
             total += 1
@@ -262,7 +285,8 @@ def main():
         if batch and writing:
             push(table, conflict, batch)
         print(f"  {table:<16}{total:>8} rows"
-              f"{'' if writing else '  (not written)'}")
+              f"{'' if writing else '  (not written)'}"
+              f"{f'   {skipped} skipped: no id' if skipped else ''}")
 
     if dangling:
         print(f"\n  {dangling} actions reference an item not in this snapshot. "

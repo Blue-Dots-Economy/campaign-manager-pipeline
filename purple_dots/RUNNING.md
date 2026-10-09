@@ -1,28 +1,57 @@
 # Running the Purple Dots loader
 
-Raya calls -> Supabase. A batch job: it runs, writes, exits.
+Raya calls -> Postgres. A batch job: it runs, writes, exits.
 
-> **This is the Supabase branch.** The `postgres` branch is the same
-> pipeline writing to a local Postgres instead - no hosted database, no
-> service key, `docker compose up` for storage. Same commands either way.
+> **This is the Postgres branch.** The `master` branch is the same pipeline
+> writing to the Purple Dots Supabase project instead. Same commands either
+> way; only where the rows land differs.
 
 ## Setup, once
 
-Create `.env`:
+**1. Create `.env`:**
 
 ```
-SUPABASE_URL=https://blzzscjqvaqfwxzlqtfn.supabase.co
-SUPABASE_SECRET_KEY=<Purple Dots service key>
+POSTGRES_PASSWORD=<choose anything>
+DATABASE_URL=postgresql://purple:<the same one>@localhost:5433/campaign-manager-purpledots
 RAYA_API_KEY=<ALIMCO / Purple Dots Raya key>
 ```
 
+The password is yours to pick - the database is local and not exposed. Both
+lines must carry the same one; `docker compose` reads the first and the
+pipeline reads the second.
+
+**2. Start the database.**
+
 ```
 cd purple_dots
+docker compose up -d
+```
+
+Postgres on port **5433**, not 5432, so it cannot collide with another one
+already running - that collision is silent, and writes land in the wrong
+place. If 5433 is taken as well, set `PD_DB_PORT` in `.env` and use the same
+port in `DATABASE_URL`. The data lives in a named volume, so `docker compose down` keeps it.
+`down -v` does not.
+
+**3. Create the tables, once:**
+
+```
+python init_db.py
+```
+
+Re-runnable, and it prints every table with its row count. It also creates
+the `service_role`, `anon` and `authenticated` roles the schema grants to -
+Supabase provided those and a bare Postgres does not.
+
+**4. Build the image** (only if you want to run it in a container):
+
+```
 docker build -t purple-dots .
 ```
 
-Rebuild whenever you pull. The tables already exist; on a fresh Supabase
-project run `sql/create_purple_dots.sql` first.
+Rebuild whenever you pull. Note the container reaches the database on the
+host, so pass `--add-host=host.docker.internal:host-gateway` and point
+`DATABASE_URL` at `host.docker.internal:5433` rather than `localhost`.
 
 ## Every run
 

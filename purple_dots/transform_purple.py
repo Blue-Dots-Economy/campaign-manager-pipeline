@@ -124,12 +124,8 @@ def _as_dict(value: Any) -> dict[str, Any]:
     return {}
 
 
-# Identifiers only. The profile tools also carry beneficiary_name, age,
-# gender, address, documents_available, disability_type and
-# disability_percentage - we deliberately do NOT read them. The platform
-# already holds that record; copying it into a second database would put a
-# named person's disability status somewhere it does not need to be. The id
-# is enough to join back when someone genuinely needs the detail.
+# Identifiers only. The profile tools also carry name, age, gender, address
+# and disability detail; those stay on the platform. Join back by item_id.
 PROFILE_FIELDS = ("item_id", "user_id", "acting_as_user_id")
 
 
@@ -295,21 +291,13 @@ def make_row(
     # section E lives here, not in call_output
     prof = profile_from_tools(raw_transcript)
 
-    # The uuid, always. contact_id looked like the better key - it is what
-    # the Blue Dots tables use - but a contact with two attempts produces TWO
-    # calls sharing one contact_id, and this table is one row per CALL. It is
-    # kept alongside as its own column so a batch contact can still be joined.
+    # Keyed on uuid: one row per CALL. A retried contact produces two calls
+    # sharing one contact_id, which is kept as its own column.
     cid = contact.get("contact_id")
     call_id = str(call.get("uuid"))
 
-    # There is deliberately no phone variable here. An earlier version
-    # assembled one from contact.phone / agent_args.contact_phone /
-    # caller_no / to_number and then never used it, because this table has no
-    # phone column. In a module whose whole purpose is to not carry personal
-    # data, a ready-made phone number sitting in scope is one careless
-    # `"phone": phone,` away from undoing that - so it is gone rather than
-    # left unused. If a phone is ever genuinely needed, take it from the
-    # platform via profile_item_id instead of storing it again here.
+    # No phone variable, deliberately: this table has no phone column, and
+    # one in scope is a line away from being added. Use profile_item_id.
 
     return {
         "call_id": call_id,
@@ -333,13 +321,9 @@ def make_row(
         "call_duration_seconds": number(call.get("call_duration")),
         "contact_attempts": len(contact.get("calls") or []) or 1,
 
-        # C - CALL OUTCOME
-        # The contact's status wins over the call's outcome. They disagree on
-        # exactly the calls nobody picked up: the batch contact says
-        # "Unanswered", the per-call endpoint says "Failure" for the same call.
-        # The master sheet uses the contact's wording, and a batch-less call
-        # has no contact, so OUTCOME_AS_STATUS maps the one onto the other
-        # rather than leaving the column speaking two vocabularies.
+        # C - CALL OUTCOME. Contact status wins: it says "Unanswered" where
+        # the call endpoint says "Failure". OUTCOME_AS_STATUS maps the one
+        # onto the other for batch-less calls, which have no contact.
         "call_status": (clean(contact.get("status"))
                         or OUTCOME_AS_STATUS.get(clean(call.get("outcome")),
                                                  clean(call.get("outcome")))),
@@ -360,10 +344,8 @@ def make_row(
         "profile_user_id": clean(prof.get("user_id")
                                  or prof.get("acting_as_user_id")),
 
-        # F - NEEDS. The coded category only. disabilities_discussed and
-        # needs_challenges_discussed are free text the bot wrote about this
-        # person's condition - "locomotor disabled in both legs since
-        # childhood" - and are not read.
+        # F - NEEDS. Coded category only; disabilities_discussed and
+        # needs_challenges_discussed are free text about the condition.
         "disability_category_mapped": str_list(out.get("disability_category_mapped")),
         "user_unsure_disability": yes_no(out.get("user_unsure_disability")),
         "user_unsure_needs": yes_no(out.get("user_unsure_needs")),
@@ -385,10 +367,8 @@ def make_row(
         "connect_provider_api_successful": yes_no(out.get("connect_provider_api_successful")),
         "providers_connected": whole(out.get("providers_connected")),
 
-        # I - QUALITY. Read from call_output, but the bot has never once
-        # filled it: 0 of 824 rows. The master sheet carries a value on every
-        # row, so whoever builds the sheet scores it by hand. Kept wired up so
-        # it populates by itself if the bot is ever asked to return it.
+        # I - QUALITY. The bot has never filled call_value_score: 0 of 824.
+        # Wired up so it populates if it ever starts.
         "call_value_score": number(out.get("call_value_score")),
 
         "drop_reason": clean(out.get("drop_reason")),

@@ -6,13 +6,16 @@ the kind of link that later turns into one script loading the wrong .env and
 writing to the wrong database. A few hundred duplicated lines is the cheaper
 mistake.
 """
+import os
 import time
 from typing import Any
 
 import requests
 from requests.adapters import HTTPAdapter
 
-RAYA_BASE_URL = "https://v1.getraya.app"
+# Overridable so a different Raya deployment - or a stub in a test - does
+# not need a code change.
+RAYA_BASE_URL = os.getenv("RAYA_BASE_URL", "https://v1.getraya.app")
 
 # Shared session with a big enough connection pool that concurrent transcript
 # fetches actually run concurrently instead of

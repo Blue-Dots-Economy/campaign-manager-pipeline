@@ -1,28 +1,12 @@
-"""The whole Purple Dots pipeline, in one command.
+"""The whole Purple Dots pipeline.
 
-    python run_pipeline.py --dry-run     # rehearse every stage, write nothing
-    python run_pipeline.py               # the real thing
+    python run_pipeline.py --dry-run
+    python run_pipeline.py
 
-Four stages, in order:
-
-    1. check     every connection and table, before anything is fetched
-    2. outbound  calls the bots made, via batches
-    3. inbound   calls people made to the bots
-    4. platform  the S3 dump: users, items, actions
-
-STAGES SKIP THEMSELVES WHEN THEY CANNOT RUN
-Stage 4 needs campaign-manager credentials that are not configured yet, so
-it reports 'skipped' and the run still succeeds. The alternative - failing
-the whole pipeline because one optional source is not set up - teaches
-people to ignore the exit code, which is the one thing it must not do.
-
-A STAGE FAILING DOES NOT STOP THE REST
-Inbound failing should not cost you the outbound calls; they are separate
-sources writing separate rows. The exit code is the number of stages that
-failed, and the summary says which.
-
-Stage 1 is the exception. If nothing is reachable there is no point
-fetching for twenty minutes to find out, so a failed check stops the run.
+Stages: check, outbound, inbound, platform. A failed check stops the run;
+any other failure leaves the remaining stages to run. Exit code is the
+number of stages that failed. The platform stage skips itself when its
+credentials are unset.
 """
 import argparse
 import os
@@ -65,18 +49,27 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
                     help="rehearse every stage; nothing is written")
+    ap.add_argument("--refresh-days", type=int,
+                    default=int(os.getenv("PD_REFRESH_DAYS", "3")),
+                    metavar="N",
+                    help="re-fetch stored calls from the last N days, so a "
+                         "call captured mid-call is corrected. 0 disables. "
+                         "Default 3, or PD_REFRESH_DAYS.")
     ap.add_argument("--skip", action="append", default=[],
                     metavar="STAGE",
                     choices=["check", "outbound", "inbound", "platform"],
                     help="leave a stage out; repeatable")
     args = ap.parse_args()
 
-    print(f"Purple Dots pipeline  {'(dry run)' if args.dry_run else ''}")
+    refresh = (["--refresh-days", str(args.refresh_days)]
+               if args.refresh_days else [])
+    print(f"Purple Dots pipeline  {'(dry run)' if args.dry_run else ''}"
+          + (f"  refreshing the last {args.refresh_days} days"
+             if refresh else ""))
 
     results = []
 
-    # 1. Check. Not given --dry-run: it only ever reads, and a rehearsed
-    #    connection check would be worth nothing.
+    # No --dry-run: the check only reads.
     if "check" not in args.skip:
         ok, secs, note = run("1/4  check - connections and tables",
                              ["load_purple.py", "--check"], dry_run=False)
@@ -87,18 +80,19 @@ def main():
             return 1
 
     if "outbound" not in args.skip:
-        results.append(("outbound", *run("2/4  outbound - calls the bots made",
-                                         ["load_purple.py"], args.dry_run)))
+        results.append(("outbound", *run(
+            "2/4  outbound - calls the bots made",
+            ["load_purple.py"] + refresh, args.dry_run)))
 
     if "inbound" not in args.skip:
-        results.append(("inbound", *run("3/4  inbound - calls people made in",
-                                        ["load_purple.py", "--inbound"],
-                                        args.dry_run)))
+        results.append(("inbound", *run(
+            "3/4  inbound - calls people made in",
+            ["load_purple.py", "--inbound"] + refresh, args.dry_run)))
 
-    # 4. Platform. Optional: the campaign-manager credentials are separate
-    #    from the Raya and database ones and may not exist on this machine.
+    # Optional: its credentials are separate from Raya's and the database's.
     if "platform" not in args.skip:
-        missing = [n for n in ("BASE_URL", "KEYCLOAK_URL", "CLIENT_SECRET")
+        missing = [n for n in ("BASE_URL", "KEYCLOAK_URL", "REALM", "CLIENT_ID",
+                               "CLIENT_SECRET")
                    if not os.getenv(n)]
         if missing:
             print()
