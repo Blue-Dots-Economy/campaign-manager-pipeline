@@ -17,6 +17,9 @@ from requests.adapters import HTTPAdapter
 # not need a code change.
 RAYA_BASE_URL = os.getenv("RAYA_BASE_URL", "https://v1.getraya.app")
 
+# Page size for /api/batch/{id}/contacts; 1000 is the API maximum.
+CONTACTS_PAGE_SIZE = 1000
+
 # Shared session with a big enough connection pool that concurrent transcript
 # fetches actually run concurrently instead of
 # queuing for a connection — the default adapter pool is only 10.
@@ -209,7 +212,7 @@ def fetch_call_detail(api_key: str, call_uuid: str) -> dict[str, Any] | None:
 def fetch_all_contacts(api_key: str, batch_id: int | str) -> list[dict[str, Any]]:
     all_contacts: list[dict[str, Any]] = []
     offset = 0
-    limit = 1000   # API max for /api/batch/{id}/contacts
+    limit = CONTACTS_PAGE_SIZE
     while True:
         contacts, total = fetch_contacts(api_key, batch_id, offset=offset, limit=limit)
         if not contacts:

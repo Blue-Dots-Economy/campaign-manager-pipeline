@@ -39,6 +39,8 @@ from transform_purple import make_connections, make_row  # noqa: E402
 TABLE = "purple_dots_calls"
 CONN_TABLE = "purple_dots_connections"
 OUT_DIR = "data"
+# Raya's outcome for a call that was not picked up or could not be dialled.
+UNANSWERED_OUTCOME = "Failure"
 
 # The Purple Dots bots, as they exist in the Raya account the Blue Dots key
 # can see. Named explicitly rather than matched on "purple" in the name: a
@@ -507,10 +509,12 @@ def main():
     rows, conns, thin = [], [], 0
     for n, call in enumerate(fresh, start=1):
         detail = {}
-        # "Failure" is Raya's outcome for a call that was not picked up or
-        # could not be dialled: no conversation, so no transcript to fetch.
-        # Its row is built from the batch-contacts record below.
-        if call.get("outcome") != "Failure":
+        # An unanswered batch call has no conversation, so no transcript to
+        # fetch; its row is built from the batch-contacts record, which
+        # carries call_output and the contact's agent_args. Inbound calls
+        # come from /api/call, whose list has no call_output, so they are
+        # always fetched.
+        if args.inbound or call.get("outcome") != UNANSWERED_OUTCOME:
             try:
                 detail = fetch_call_detail(api_key, call["uuid"]) or {}
             except Exception:
