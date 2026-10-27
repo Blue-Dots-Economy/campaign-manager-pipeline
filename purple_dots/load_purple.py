@@ -506,10 +506,15 @@ def main():
     print("\nFetching call detail (call_output and transcript)...")
     rows, conns, thin = [], [], 0
     for n, call in enumerate(fresh, start=1):
-        try:
-            detail = fetch_call_detail(api_key, call["uuid"]) or {}
-        except Exception:
-            detail = {}
+        detail = {}
+        # "Failure" is Raya's outcome for a call that was not picked up or
+        # could not be dialled: no conversation, so no transcript to fetch.
+        # Its row is built from the batch-contacts record below.
+        if call.get("outcome") != "Failure":
+            try:
+                detail = fetch_call_detail(api_key, call["uuid"]) or {}
+            except Exception:
+                detail = {}
         if not detail:
             detail = call
         detail.setdefault("uuid", call.get("uuid"))

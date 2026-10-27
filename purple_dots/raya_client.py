@@ -209,7 +209,7 @@ def fetch_call_detail(api_key: str, call_uuid: str) -> dict[str, Any] | None:
 def fetch_all_contacts(api_key: str, batch_id: int | str) -> list[dict[str, Any]]:
     all_contacts: list[dict[str, Any]] = []
     offset = 0
-    limit = 100
+    limit = 1000   # API max for /api/batch/{id}/contacts
     while True:
         contacts, total = fetch_contacts(api_key, batch_id, offset=offset, limit=limit)
         if not contacts:

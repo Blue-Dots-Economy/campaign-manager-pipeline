@@ -284,7 +284,9 @@ def make_row(
     contact = contact or {}
     batch = batch or {}
     out = call_output_of(call)
-    args = call.get("agent_args") or {}
+    # A call built from the batch-contacts list (unanswered, detail not
+    # fetched) has no agent_args of its own; the contact carries them.
+    args = call.get("agent_args") or contact.get("agent_args") or {}
     if not isinstance(args, dict):
         args = {}
     raw_transcript = call.get("call_transcript")
