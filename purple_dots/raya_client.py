@@ -32,7 +32,7 @@ _session.mount("http://", _adapter)
 def _get_with_retry(url: str, max_retries: int = 6, **kwargs: Any) -> requests.Response:
     """GET with automatic backoff on 429 and on transient server errors.
 
-    429 is needed because concurrent fetches (see build_rows_for_batches) trip
+    429 is needed because concurrent fetches (load_purple.py --workers) trip
     Raya's rate limiter. 5xx matters just as much: Raya sits behind Cloudflare
     and intermittently answers 502/503/504/520/522 with an HTML error page. A
     full push walks tens of thousands of contacts over twenty-odd minutes, so
