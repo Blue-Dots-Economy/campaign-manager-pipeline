@@ -17,6 +17,9 @@ from requests.adapters import HTTPAdapter
 # not need a code change.
 RAYA_BASE_URL = os.getenv("RAYA_BASE_URL", "https://v1.getraya.app")
 
+# Page size for /api/batch/{id}/contacts; 1000 is the API maximum.
+CONTACTS_PAGE_SIZE = 1000
+
 # Shared session with a big enough connection pool that concurrent transcript
 # fetches actually run concurrently instead of
 # queuing for a connection — the default adapter pool is only 10.
@@ -29,7 +32,7 @@ _session.mount("http://", _adapter)
 def _get_with_retry(url: str, max_retries: int = 6, **kwargs: Any) -> requests.Response:
     """GET with automatic backoff on 429 and on transient server errors.
 
-    429 is needed because concurrent fetches (see build_rows_for_batches) trip
+    429 is needed because concurrent fetches (load_purple.py --workers) trip
     Raya's rate limiter. 5xx matters just as much: Raya sits behind Cloudflare
     and intermittently answers 502/503/504/520/522 with an HTML error page. A
     full push walks tens of thousands of contacts over twenty-odd minutes, so
@@ -209,7 +212,7 @@ def fetch_call_detail(api_key: str, call_uuid: str) -> dict[str, Any] | None:
 def fetch_all_contacts(api_key: str, batch_id: int | str) -> list[dict[str, Any]]:
     all_contacts: list[dict[str, Any]] = []
     offset = 0
-    limit = 100
+    limit = CONTACTS_PAGE_SIZE
     while True:
         contacts, total = fetch_contacts(api_key, batch_id, offset=offset, limit=limit)
         if not contacts:

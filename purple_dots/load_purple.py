@@ -20,6 +20,8 @@ import datetime
 import io
 import json
 import os
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 
@@ -39,6 +41,12 @@ from transform_purple import make_connections, make_row  # noqa: E402
 TABLE = "purple_dots_calls"
 CONN_TABLE = "purple_dots_connections"
 OUT_DIR = "data"
+# Raya's outcome for a call that was not picked up or could not be dialled.
+UNANSWERED_OUTCOME = "Failure"
+# Calls between progress lines in the detail fetch.
+PROGRESS_EVERY = 100
+# Calls whose detail is fetched together when --push-every is 0.
+FETCH_CHUNK = 100
 
 # The Purple Dots bots, as they exist in the Raya account the Blue Dots key
 # can see. Named explicitly rather than matched on "purple" in the name: a
@@ -341,6 +349,36 @@ def push(rows, size=200, table=TABLE, on_conflict="call_id"):
     return done
 
 
+def push_new(rows, conns, pushed_rows, pushed_conns):
+    """Push the rows and connections not pushed yet; return the new counts."""
+    if len(rows) > pushed_rows:
+        print(f"\nPushing {len(rows) - pushed_rows} rows to {TABLE}...")
+        push(rows[pushed_rows:])
+    if len(conns) > pushed_conns:
+        # after the calls, never before: the FK points at them
+        print(f"Pushing {len(conns) - pushed_conns} connections to "
+              f"{CONN_TABLE}...")
+        push(conns[pushed_conns:], table=CONN_TABLE,
+             on_conflict="call_id,provider_item_id")
+    return len(rows), len(conns)
+
+
+def fetch_detail(api_key, call, inbound):
+    """Full detail for one call, or {} if the fetch failed.
+
+    An unanswered batch call has no conversation, so no transcript to fetch;
+    its row is built from the batch-contacts record, which carries
+    call_output and the contact's agent_args. Inbound calls come from
+    /api/call, whose list has no call_output, so they are always fetched.
+    """
+    if not inbound and call.get("outcome") == UNANSWERED_OUTCOME:
+        return call
+    try:
+        return fetch_call_detail(api_key, call["uuid"]) or {}
+    except Exception:
+        return {}
+
+
 def batch_walk(args, api_key):
     """Every call that came through a batch, plus its contact record.
 
@@ -423,6 +461,20 @@ def main():
                          "running keeps whatever call_output existed at that "
                          "moment, and the per-call skip means it is never "
                          "looked at again; this is how it gets corrected.")
+    ap.add_argument("--push-every", type=int,
+                    default=int(os.getenv("PD_PUSH_EVERY", "100")),
+                    metavar="N",
+                    help="push to the database every N calls instead of once "
+                         "at the end, so a run killed part-way keeps what it "
+                         "built and the next run skips those calls. 0 pushes "
+                         "once at the end. Default 100, or PD_PUSH_EVERY.")
+    ap.add_argument("--workers", type=int,
+                    default=int(os.getenv("PD_WORKERS", "4")),
+                    metavar="N",
+                    help="call details fetched in parallel. Raya rate-limits "
+                         "per key and every worker shares it; 429s are "
+                         "retried with backoff. 1 fetches one at a time. "
+                         "Default 4, or PD_WORKERS.")
     ap.add_argument("--csv", action="store_true",
                     help="also write the rows to data/ for inspection. Off by "
                          "default: the pipeline's job is to land data in "
@@ -504,31 +556,55 @@ def main():
         print(f"  --limit: keeping {len(fresh)}")
 
     print("\nFetching call detail (call_output and transcript)...")
-    rows, conns, thin = [], [], 0
-    for n, call in enumerate(fresh, start=1):
-        try:
-            detail = fetch_call_detail(api_key, call["uuid"]) or {}
-        except Exception:
-            detail = {}
-        if not detail:
-            detail = call
-        detail.setdefault("uuid", call.get("uuid"))
-        detail.setdefault("agent_id", call["_agent_id"])
-        contact, batch = contacts.get(str(call.get("uuid")), (None, None))
-        row = make_row(detail, agent_name=call["_agent_name"],
-                       contact=contact, batch=batch)
-        # Loading policy, not a property of the call - make_row stays pure.
-        if args.inbound and is_test_caller(detail):
-            row["test_flag"] = True
-        elif str(row.get("batch_id")) in quarantined:
-            row["test_flag"] = True
-        conns.extend(make_connections(detail, row["call_id"]))
-        if not row.get("call_summary") and not row.get("call_status"):
-            thin += 1
-        rows.append(row)
-        if n % 50 == 0:
-            print(f"  {n}/{len(fresh)}")
+    rows, conns, thin, failed = [], [], 0, 0
+    pushed_rows = pushed_conns = 0
+    started = time.monotonic()
+    # Fetched a chunk at a time, in parallel; rows are still built and pushed
+    # here, in call order, so only one chunk of transcripts is held at once.
+    chunk = args.push_every or FETCH_CHUNK
+    with ThreadPoolExecutor(max_workers=max(args.workers, 1)) as pool:
+        for start in range(0, len(fresh), chunk):
+            part = fresh[start:start + chunk]
+            details = pool.map(
+                lambda c: fetch_detail(api_key, c, args.inbound), part)
+            for n, (call, detail) in enumerate(zip(part, details),
+                                               start=start + 1):
+                # Top of the loop, so calls skipped by a failed fetch still
+                # count.
+                done = n - 1
+                if done and done % PROGRESS_EVERY == 0:
+                    secs = time.monotonic() - started
+                    print(f"  {done}/{len(fresh)} calls, {pushed_rows} rows "
+                          f"saved, {failed} skipped, {secs / 60:.1f} min, "
+                          f"{done / secs:.1f} calls/s")
+                # Not stored: existing_ids() would skip the call on every
+                # later run, leaving it without its transcript for good.
+                if not detail:
+                    failed += 1
+                    continue
+                detail.setdefault("uuid", call.get("uuid"))
+                detail.setdefault("agent_id", call["_agent_id"])
+                contact, batch = contacts.get(str(call.get("uuid")),
+                                              (None, None))
+                row = make_row(detail, agent_name=call["_agent_name"],
+                               contact=contact, batch=batch)
+                # Loading policy, not a property of the call - make_row
+                # stays pure.
+                if args.inbound and is_test_caller(detail):
+                    row["test_flag"] = True
+                elif str(row.get("batch_id")) in quarantined:
+                    row["test_flag"] = True
+                conns.extend(make_connections(detail, row["call_id"]))
+                if not row.get("call_summary") and not row.get("call_status"):
+                    thin += 1
+                rows.append(row)
+            if not args.dry_run and args.push_every:
+                pushed_rows, pushed_conns = push_new(rows, conns,
+                                                     pushed_rows, pushed_conns)
     print(f"  built {len(rows)} rows ({thin} with no call_output at all)")
+    if failed:
+        print(f"  {failed} call(s) skipped: detail fetch failed; the next run "
+              f"retries them")
     print(f"  {len(conns)} provider connections across "
           f"{len({c['call_id'] for c in conns})} calls")
 
@@ -586,14 +662,8 @@ def main():
     if not rows:
         print("\nnothing new to push.")
         return
-    print(f"\nPushing {len(rows)} rows to {TABLE}...")
-    print(f"done, {push(rows)} rows")
-    if conns:
-        # after the calls, never before: the FK points at them
-        print(f"\nPushing {len(conns)} connections to {CONN_TABLE}...")
-        n = push(conns, table=CONN_TABLE,
-                 on_conflict="call_id,provider_item_id")
-        print(f"done, {n} rows")
+    push_new(rows, conns, pushed_rows, pushed_conns)
+    print(f"\ndone, {len(rows)} rows and {len(conns)} connections pushed")
 
 
 if __name__ == "__main__":
