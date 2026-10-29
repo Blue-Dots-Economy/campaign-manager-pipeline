@@ -110,8 +110,8 @@ docker run --rm --env-file .env purple-dots --inbound
 docker run --rm --env-file .env --entrypoint python purple-dots run_pipeline.py
 ```
 
-Four stages: check, outbound, inbound, platform. A stage that cannot run
-says so and the rest carry on.
+Three stages: check, outbound, inbound. A failed check stops the run; after
+that, a stage that fails says so and the rest carry on.
 
 ---
 

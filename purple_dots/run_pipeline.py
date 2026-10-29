@@ -3,10 +3,9 @@
     python run_pipeline.py --dry-run
     python run_pipeline.py
 
-Stages: check, outbound, inbound, platform. A failed check stops the run;
-any other failure leaves the remaining stages to run. Exit code is the
-number of stages that failed. The platform stage skips itself when its
-credentials are unset.
+Stages: check, outbound, inbound. A failed check stops the run; any other
+failure leaves the remaining stages to run. Exit code is the number of
+stages that failed.
 """
 import argparse
 import os
@@ -19,10 +18,8 @@ from dotenv import load_dotenv
 
 HERE = Path(__file__).resolve().parent
 
-# The stages load this themselves; this copy is for the "is stage 4
-# configured?" test below, which happens before any of them start. Without
-# it the platform stage reports itself unconfigured while sitting next to a
-# .env that configures it.
+# The stages load this themselves; this copy lets PD_REFRESH_DAYS in .env set
+# the --refresh-days default.
 load_dotenv(HERE / ".env")
 
 
@@ -57,7 +54,7 @@ def main():
                          "Default 3, or PD_REFRESH_DAYS.")
     ap.add_argument("--skip", action="append", default=[],
                     metavar="STAGE",
-                    choices=["check", "outbound", "inbound", "platform"],
+                    choices=["check", "outbound", "inbound"],
                     help="leave a stage out; repeatable")
     args = ap.parse_args()
 
@@ -71,7 +68,7 @@ def main():
 
     # No --dry-run: the check only reads.
     if "check" not in args.skip:
-        ok, secs, note = run("1/4  check - connections and tables",
+        ok, secs, note = run("1/3  check - connections and tables",
                              ["load_purple.py", "--check"], dry_run=False)
         results.append(("check", ok, secs, note))
         if not ok:
@@ -81,29 +78,13 @@ def main():
 
     if "outbound" not in args.skip:
         results.append(("outbound", *run(
-            "2/4  outbound - calls the bots made",
+            "2/3  outbound - calls the bots made",
             ["load_purple.py"] + refresh, args.dry_run)))
 
     if "inbound" not in args.skip:
         results.append(("inbound", *run(
-            "3/4  inbound - calls people made in",
+            "3/3  inbound - calls people made in",
             ["load_purple.py", "--inbound"] + refresh, args.dry_run)))
-
-    # Optional: its credentials are separate from Raya's and the database's.
-    if "platform" not in args.skip:
-        missing = [n for n in ("BASE_URL", "KEYCLOAK_URL", "REALM", "CLIENT_ID",
-                               "CLIENT_SECRET")
-                   if not os.getenv(n)]
-        if missing:
-            print()
-            print("=" * 72)
-            print("  4/4  platform - S3 dump")
-            print("=" * 72)
-            print(f"  skipped: {', '.join(missing)} not set. See .env.example.")
-            results.append(("platform", True, 0.0, "skipped - not configured"))
-        else:
-            results.append(("platform", *run("4/4  platform - S3 dump",
-                                             ["sync_s3.py"], args.dry_run)))
 
     return _summary(results)
 

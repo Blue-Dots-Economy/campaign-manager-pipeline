@@ -5,7 +5,7 @@
 #   docker run --rm --env-file .env purple-dots --dry-run
 #   docker run --rm --env-file .env purple-dots
 #
-# Or everything - calls in and out, plus the platform dump - in one go:
+# Or everything - calls in and out - in one go:
 #   docker run --rm --env-file .env --entrypoint python purple-dots \n#       run_pipeline.py
 #
 # A batch job, not a service. It runs, writes to Postgres, and exits.
@@ -40,7 +40,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Only the pipeline. The allow-list lives in .dockerignore.
 COPY load_purple.py raya_client.py transform_purple.py ./
-COPY db.py sync_s3.py run_pipeline.py ./
+COPY db.py run_pipeline.py ./
 COPY sql/ ./sql/
 
 # Only --csv writes here, and nothing does by default. The directory exists
