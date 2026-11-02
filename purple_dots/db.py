@@ -85,9 +85,6 @@ def _conn():
         conn.close()
 
 
-# The pipeline's schema on the shared database.
-PLATFORM_SCHEMA = "platform"
-
 _JSON_COLUMNS = {}
 
 
@@ -97,7 +94,7 @@ def json_columns(cur, table, schema="public"):
     Needed because a Python list means two different things here:
     purple_dots_calls has text[] columns (tools_used,
     disability_category_mapped, ...) which psycopg2 adapts natively, while
-    the platform tables have jsonb which needs Json(). Wrapping everything
+    a jsonb column needs Json(). Wrapping everything
     gave 'malformed array literal: "[\"Low Vision\"]"' on every call that
     used a tool - which is nearly all of them.
     """

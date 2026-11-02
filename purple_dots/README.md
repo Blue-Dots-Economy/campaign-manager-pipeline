@@ -6,9 +6,8 @@ employer, no job.
 
 **To run it: [RUNNING.md](RUNNING.md).**
 
-    run_pipeline.py             all four stages in one command
+    run_pipeline.py             all three stages in one command
     load_purple.py              calls: fetch, transform, push
-    sync_s3.py                  platform data: users, items, actions
     transform_purple.py         one Raya call -> one purple_dots_calls row
     raya_client.py              Raya API, standalone copy
     db.py                       every read and write to the database
@@ -17,16 +16,15 @@ employer, no job.
     sql/                        the tables
     Dockerfile, .dockerignore   the container
 
-Two sources, two scripts, no overlap. `load_purple.py` records what happened
-on the phone; `sync_s3.py` records what exists on the platform. They meet
-only through `profile_item_id`.
+`load_purple.py` records what happened on the phone. What exists on the
+platform (users, items, actions) is synced separately, by platform-sync in
+Blue-Dots-Economy/adhoc-scripts. The two meet only through `profile_item_id`.
 
 ## Where the tables live
 
 One database, `campaign-manager-purpledots`, and one login, `campaign_manager`.
 
     public     dashboard migrations; we write purple_dots_calls, purple_dots_connections
-    platform   ours: purple_users, purple_items, purple_actions
 
 `init_db.py` creates `public` tables only on a local database.
 
