@@ -58,7 +58,7 @@ def main():
                     help="leave a stage out; repeatable")
     args = ap.parse_args()
 
-    refresh = (["--refresh-days", str(args.refresh_days)]
+    refresh = (["--refresh-days", str(int(args.refresh_days))]
                if args.refresh_days else [])
     print(f"Purple Dots pipeline  {'(dry run)' if args.dry_run else ''}"
           + (f"  refreshing the last {args.refresh_days} days"
